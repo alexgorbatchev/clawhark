@@ -16,6 +16,7 @@ object AppLog {
     private const val TAG_PREFIX = "WR"
     private const val MAX_LOG_SIZE = 2 * 1024 * 1024L // 2MB, then rotate
     private const val FLUSH_BUFFER_SIZE = 4096
+    private const val MAX_BUFFER_CHARS = 65536
     private const val FLUSH_INTERVAL_MS = 30_000L
     private var logFile: File? = null
     private var logDir: File? = null
@@ -76,6 +77,10 @@ object AppLog {
     private fun writeToFile(level: String, tag: String, msg: String) {
         try {
             buffer.append(formatDate()).append(' ').append(level).append('/').append(tag).append(": ").append(msg).append('\n')
+            // Disk failures must not turn diagnostic logging into an unbounded memory leak.
+            if (buffer.length > MAX_BUFFER_CHARS) {
+                buffer.delete(0, buffer.length - MAX_BUFFER_CHARS)
+            }
             val now = System.currentTimeMillis()
             if (level == "E" || buffer.length >= FLUSH_BUFFER_SIZE || now - lastFlushTime >= FLUSH_INTERVAL_MS) {
                 flushBuffer()

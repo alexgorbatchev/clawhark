@@ -1,4 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ClawHark</string>
+    <string name="link_title">Link Google Drive</string>
+    <string name="tap_connect">Tap to connect</string>
+    <string name="link">LINK</string>
+    <string name="link_account">Link Google Drive account</string>
+    <string name="stopped">STOPPED</string>
+    <string name="start">START</string>
+    <string name="stop">STOP</string>
+    <string name="start_recording">Start recording</string>
+    <string name="stop_recording">Stop recording</string>
+    <string name="confirm_stop">Confirm stop recording</string>
+    <string name="tap_record">Tap to record</string>
+    <string name="connect_drive">Tap LINK to connect\nyour Google Drive</string>
+    <string name="retry">RETRY</string>
+    <string name="requesting_code">Requesting code…</string>
+    <string name="connection_failed">Failed to connect.\nCheck your connection and retry.</string>
+    <string name="enter_code">Enter code at</string>
+    <string name="waiting">WAITING</string>
+    <string name="waiting_dots">WAITING%1$s</string>
+    <string name="connected">Connected!</string>
+    <string name="ok">OK</string>
+    <string name="code_expired">Code expired.\nTap to try again.</string>
+    <string name="auth_error">Error: %1$s\nTap to retry.</string>
+    <string name="sure">SURE?</string>
+    <string name="tap_stop">Tap again to stop</string>
+    <string name="recording">RECORDING</string>
+    <string name="recovering">RECOVERING MIC</string>
+    <string name="storage_full">STORAGE FULL</string>
+    <string name="mic_permission">MIC PERMISSION</string>
+    <string name="starting">STARTING</string>
+    <string name="pending_storage">%1$s MB pending\nWaiting for uploads</string>
+    <string name="microphone_retry">Microphone unavailable\nRetrying automatically</string>
+    <string name="drive_disconnected">Drive disconnected\nAudio remains on this watch</string>
+    <string name="recording_info">%1$dh %2$dm | %3$s\n%4$s MB pending</string>
+    <plurals name="chunk_count">
+        <item quantity="one">%d chunk</item>
+        <item quantity="other">%d chunks</item>
+    </plurals>
+    <string name="record_help">Tap to record\nLong press to sign out</string>
+    <string name="signed_out">Signed out</string>
+    <string name="revocation_unavailable">Disconnected locally. Revoke access in your Google Account settings.</string>
+    <string name="permissions_required">Microphone permission required.\nGo to Settings > Apps.</string>
+    <string name="battery_settings">To keep recording during sleep, allow ClawHark in battery optimization settings.</string>
 </resources>

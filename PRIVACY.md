@@ -1,72 +1,31 @@
 # ClawHark Privacy Policy
 
-**Last updated:** February 28, 2026
+ClawHark captures microphone audio on your watch and uploads completed recordings to the Google Drive account you authorize. This repository provides the watch app and Drive uploads.
 
-## Overview
+## Audio and storage
 
-ClawHark is an open-source audio recording app for Wear OS. It records audio on your watch and uploads it to **your own** Google Drive account. We do not operate any servers or collect any data.
+Audio is stored in the app's private internal storage as AAC/M4A recordings. Completed files are uploaded to a `ClawHark` folder in your Google Drive. Local files are deleted only after Drive acknowledges the matching file ID, name, size, and checksum.
 
-## Data Collection
+Upload failures preserve recordings for retry. When storage fills, recording pauses rather than deleting unuploaded audio. Incomplete recordings from a crash may remain on the watch for recovery or diagnosis.
 
-**ClawHark does not collect, store, or transmit any personal data to us or any third party.**
+Stopping recording and signing out preserve pending recordings. Linking another account sends that pending queue to the newly authorized account. Uninstalling the app removes local audio, logs, and credentials. Recordings already in Drive must be deleted separately.
 
-### What the app accesses
+Transfers to Google use HTTPS. ClawHark does not add its own encryption to audio files. On-device protection and Google Drive storage protection are provided by their respective platforms.
 
-| Data | Purpose | Where it goes |
-|------|---------|---------------|
-| Microphone audio | Recording conversations | Saved locally on watch, then uploaded to YOUR Google Drive |
-| Google Drive (scoped) | Cloud backup of recordings | Your personal Drive account only, in a "ClawHark" folder |
+## Google authorization
 
-### What we do NOT collect
+The app uses Google's device authorization flow with the `drive.file` scope. This permits access to files created by the app or explicitly shared with it, rather than general access to your Drive.
 
-- No analytics or telemetry
-- No crash reporting to external services
-- No advertising identifiers
-- No location data
-- No contact information
-- No usage tracking
+Account access and refresh tokens are kept in encrypted preferences backed by the Android Keystore. OAuth client credentials are bundled with the app; they are not account access tokens.
 
-## Data Storage & Transfer
+Signing out clears local account credentials, stops recording, cancels uploads, and attempts to revoke Google's authorization. If offline or interrupted, server-side revocation may not complete. You can revoke access at [Google Account permissions](https://myaccount.google.com/permissions).
 
-1. **On-device:** Audio is recorded as WAV files and stored temporarily on the watch
-2. **Google Drive:** Files are uploaded to a "ClawHark" folder in your Google Drive using the `drive.file` scope (the app can only access files it created — it cannot read your other Drive files)
-3. **Auto-cleanup:** Local files are deleted after successful upload
+## Services and logs
 
-All data transfer uses HTTPS encryption. Audio files are not encrypted at rest on the watch or in Drive.
+Google handles authorization and stores uploaded audio under its [Privacy Policy](https://policies.google.com/privacy). ClawHark has no developer-operated server, analytics, advertising, transcription service, or telemetry collection.
 
-## Google OAuth
+Local diagnostic logs record service state, file-transfer status, and errors. They rotate at approximately 2 MB. Authentication tokens and authorization codes are not intentionally logged.
 
-ClawHark uses Google's Device Authorization flow to link your Google account. The app requests only the `drive.file` scope, which limits access to files created by the app. You can revoke access at any time via [Google Account permissions](https://myaccount.google.com/permissions).
+## Controls
 
-## Third-Party Services
-
-The app uses only:
-- **Google Drive API** — for uploading recordings (governed by [Google's Privacy Policy](https://policies.google.com/privacy))
-
-No other third-party services, SDKs, or analytics tools are included.
-
-## Your Rights
-
-- You can stop recording at any time
-- You can sign out to revoke Drive access
-- You can delete all recordings from your Google Drive
-- You can uninstall the app to remove all local data
-- You can revoke OAuth access via your Google Account settings
-
-## Open Source
-
-ClawHark is fully open source. You can inspect the complete source code to verify these claims:
-https://github.com/etticat/clawhark
-
-## Children's Privacy
-
-ClawHark is not directed at children under 13. We do not knowingly collect data from children.
-
-## Changes
-
-We may update this policy. Changes will be posted in the GitHub repository and reflected in the "Last updated" date above.
-
-## Contact
-
-For questions about this privacy policy:
-- GitHub Issues: https://github.com/etticat/clawhark/issues
+You can stop recording, sign out, revoke Google's authorization, delete uploaded recordings in Drive, or uninstall the app to remove its local data.

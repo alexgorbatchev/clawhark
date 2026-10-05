@@ -1,8 +1,12 @@
 package com.ettlinger.wearrecorder
 
+import android.Manifest
 import android.app.Application
+import android.app.ForegroundServiceStartNotAllowedException
 import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import org.junit.After
 import org.junit.Assert.*
@@ -22,6 +26,7 @@ class BootReceiverTest {
     @Before
     fun setUp() {
         application = RuntimeEnvironment.getApplication()
+        shadowOf(application).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
         // Exercise the receiver with native SharedPreferences without requiring a hardware keystore.
         val prefs = application.getSharedPreferences("test_auth", Context.MODE_PRIVATE)
         prefs.edit().putString("refresh_token", "test-only-token").commit()
@@ -35,14 +40,44 @@ class BootReceiverTest {
     }
 
     @Test
-    fun rebootStartsRecordingWhenPreviouslyEnabled() {
+    fun rebootAttemptsAutomaticRecording() {
         BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
-        assertEquals(RecordingService::class.java.name, shadowOf(application).nextStartedService?.component?.className)
+        assertEquals(RecordingService::class.java.name, shadowOf(application).nextStartedService.component?.className)
         assertEquals(0, application.getSystemService(NotificationManager::class.java).activeNotifications.size)
     }
 
     @Test
-    fun explicitStopDoesNotRestartRecording() {
+    @Config(sdk = [30])
+    fun automaticRestartWorksOnOldestSupportedAndroid() {
+        BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertEquals(RecordingService::class.java.name, shadowOf(application).nextStartedService.component?.className)
+    }
+
+    @Test
+    fun rejectedMicrophonePermissionProducesResumePrompt() {
+        BootReceiver().onReceive(rejectingContext(SecurityException("Background microphone restricted")),
+            Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertResumePrompt()
+    }
+
+    @Test
+    fun rejectedForegroundStartProducesResumePrompt() {
+        BootReceiver().onReceive(rejectingContext(ForegroundServiceStartNotAllowedException("Background start restricted")),
+            Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertResumePrompt()
+    }
+
+    private fun assertResumePrompt() {
+        assertNull(shadowOf(application).nextStartedService)
+        val notifications = application.getSystemService(NotificationManager::class.java).activeNotifications
+        assertEquals(1, notifications.size)
+        assertNotNull(notifications.single().notification.contentIntent)
+        notifications.single().notification.contentIntent.send()
+        assertEquals(MainActivity::class.java.name, shadowOf(application).nextStartedActivity.component?.className)
+    }
+
+    @Test
+    fun explicitStopDoesNotProduceResumePrompt() {
         setRecordingRequested(false)
         BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
         assertNull(shadowOf(application).nextStartedService)
@@ -62,6 +97,27 @@ class BootReceiverTest {
         BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
         assertNull(shadowOf(application).nextStartedService)
         assertEquals(0, application.getSystemService(NotificationManager::class.java).activeNotifications.size)
+    }
+
+    @Test
+    fun missingNotificationPermissionDoesNotBlockAutomaticRestart() {
+        shadowOf(application).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertEquals(RecordingService::class.java.name, shadowOf(application).nextStartedService.component?.className)
+        assertEquals(0, application.getSystemService(NotificationManager::class.java).activeNotifications.size)
+    }
+
+    @Test
+    fun rejectedStartWithoutNotificationPermissionDoesNotCrash() {
+        shadowOf(application).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+        BootReceiver().onReceive(rejectingContext(SecurityException("Background microphone restricted")),
+            Intent(Intent.ACTION_BOOT_COMPLETED))
+        assertNull(shadowOf(application).nextStartedService)
+        assertEquals(0, application.getSystemService(NotificationManager::class.java).activeNotifications.size)
+    }
+
+    private fun rejectingContext(error: RuntimeException): Context = object : ContextWrapper(application) {
+        override fun startForegroundService(service: Intent): ComponentName? = throw error
     }
 
     private fun setRecordingRequested(enabled: Boolean) {

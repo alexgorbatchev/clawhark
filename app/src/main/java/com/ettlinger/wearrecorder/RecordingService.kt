@@ -13,28 +13,17 @@ import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.media.MediaMuxer
+import android.media.MediaExtractor
 import android.media.MediaRecorder
 import android.os.BatteryManager
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
-import android.telephony.TelephonyManager
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
 import kotlinx.coroutines.*
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.TimeUnit
 
 class RecordingService : Service() {
 
@@ -48,14 +37,11 @@ class RecordingService : Service() {
         const val VAD_SILENCE_TIMEOUT_MS = 3000L
         const val AAC_BIT_RATE = 32000 // 32kbps — good for voice
         const val READ_BUFFER_SAMPLES = 8192 // 512ms at 16kHz — halves CPU wakeups vs 4096
-        const val UPLOAD_INTERVAL_MINUTES = 60L
-        const val UPLOAD_FALLBACK_INTERVAL_HOURS = 4L
-        const val UPLOAD_FALLBACK_WORK_NAME = "upload_fallback"
         const val STATUS_LOG_INTERVAL_MS = 300_000L // 5 min
         const val MIN_FREE_SPACE_BYTES = 50 * 1024 * 1024L // 50MB
         const val MAX_LOCAL_STORAGE_BYTES = 500 * 1024 * 1024L // Preserve queued audio; pause at the limit.
         const val RECOVERY_MAX_DELAY_MS = 60_000L
-        const val STALE_TMP_THRESHOLD_MS = 20 * 60 * 1000L // 20min — older .tmp files are likely complete
+        const val STALE_TMP_THRESHOLD_MS = 20 * 60 * 1000L // Inspect old crash chunks before publication.
 
         // Shared preference keys (used by MainActivity too)
         const val PREF_FILE = "clawhark"
@@ -108,7 +94,7 @@ class RecordingService : Service() {
         AppLog.i(TAG, "=== SERVICE CREATED ===")
         AppLog.i(TAG, "Device: ${android.os.Build.MODEL} (${android.os.Build.DEVICE})")
         AppLog.i(TAG, "Android: ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})")
-        AppLog.i(TAG, "Codec: AAC ${AAC_BIT_RATE/1000}kbps | Chunk: ${CHUNK_DURATION_MS/60000}min | Upload: every ${UPLOAD_INTERVAL_MINUTES}min")
+        AppLog.i(TAG, "Codec: AAC ${AAC_BIT_RATE/1000}kbps | Chunk: ${CHUNK_DURATION_MS/60000}min | Upload: every ${UploadScheduler.UPLOAD_INTERVAL_MINUTES}min")
         logBatteryStatus()
         createNotificationChannel()
     }
@@ -124,8 +110,6 @@ class RecordingService : Service() {
                     .edit().putBoolean(PREF_SHOULD_RECORD, false).apply()
                 logStats()
                 stopRecording()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
                 return START_NOT_STICKY
             }
             else -> {
@@ -171,6 +155,7 @@ class RecordingService : Service() {
         logStats()
         isRecording = false
         scope.cancel()
+        try { audioRecord?.stop() } catch (_: Exception) {}
         // The recording coroutine owns resource cleanup, including during cancellation.
         super.onDestroy()
     }
@@ -239,11 +224,11 @@ class RecordingService : Service() {
         }
 
         ResumeRecordingNotification.cancel(this)
-        cleanupOrphanedTmpFiles()
-        scheduleUploads()
+        UploadScheduler.schedule(this)
         recordJob = scope.launch(start = CoroutineStart.LAZY) {
             var failures = 0
             try {
+                cleanupOrphanedTmpFiles()
                 while (isActive && recordingRequested()) {
                     if (!hasEnoughDiskSpace()) {
                         updateRecordingState(RecordingState.STORAGE_FULL)
@@ -287,6 +272,7 @@ class RecordingService : Service() {
             } finally {
                 isRecording = false
                 releaseAudioCapture()
+                withContext(NonCancellable) { UploadScheduler.uploadPending(this@RecordingService) }
             }
         }
         recordJob?.start()
@@ -328,6 +314,7 @@ class RecordingService : Service() {
         try {
             check(recorder.state == AudioRecord.STATE_INITIALIZED) { "Microphone could not be initialized" }
             recorder.startRecording()
+            check(recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Microphone did not start" }
             audioRecord = recorder
             AppLog.i(TAG, "Microphone capture started")
         } catch (error: Exception) {
@@ -342,8 +329,8 @@ class RecordingService : Service() {
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ClawHark::Recording").apply {
             setReferenceCounted(false) // Prevents stacking — single release() fully releases
         }
-        wakeLock?.acquire()
-        AppLog.i(TAG, "Wake lock acquired (non-ref-counted, no timeout)")
+        wakeLock?.acquire(CHUNK_DURATION_MS + 5 * 60 * 1000L)
+        AppLog.i(TAG, "Wake lock acquired with a bounded chunk lease")
     }
 
     private fun releaseAudioCapture() {
@@ -363,6 +350,9 @@ class RecordingService : Service() {
         try { recorder.stop() } catch (_: Exception) {}
         try { recorder.release() } catch (_: Exception) {}
         audioRecord = null
+        val lock = wakeLock
+        wakeLock = null
+        if (lock?.isHeld == true) lock.release()
         var attempt = 0
         while (currentCoroutineContext().isActive && recordingRequested()) {
             val backoffMs = minOf(5000L * (1L shl minOf(attempt, 4)), RECOVERY_MAX_DELAY_MS)
@@ -371,6 +361,7 @@ class RecordingService : Service() {
             if (!recordingRequested()) return
             try {
                 openMicrophone()
+                acquireRecordingWakeLock()
                 updateRecordingState(RecordingState.RECORDING)
                 return
             } catch (error: SecurityException) {
@@ -387,185 +378,35 @@ class RecordingService : Service() {
         isRecording = false
         recordingState = RecordingState.STOPPED
         recordJob?.cancel()
+        try { audioRecord?.stop() } catch (_: Exception) {}
         // Cancel periodic uploads (no longer producing files) and trigger one final upload
-        val wm = WorkManager.getInstance(this)
-        wm.cancelUniqueWork(UploadWorker.WORK_NAME)
-        wm.cancelUniqueWork(UPLOAD_FALLBACK_WORK_NAME)
-        triggerImmediateUpload()
+        UploadScheduler.stopPeriodic(this)
+        statusJob?.cancel()
+        val previous = recordJob
+        scope.launch {
+            previous?.join()
+            if (!recordingRequested()) {
+                UploadScheduler.uploadPending(this@RecordingService)
+                withContext(Dispatchers.Main) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    AppLog.flush()
+                }
+            }
+        }
     }
 
     fun isCurrentlyRecording() = isRecording
     fun isSessionActive() = recordJob?.isActive == true
 
-    // ─── Streaming Encoder ───────────────────────────────────────────────
-
-    /**
-     * Streams PCM data to AAC encoder incrementally via MediaCodec + MediaMuxer.
-     * Created lazily when first voice audio is detected in a chunk.
-     * Writes to a .tmp file during encoding, renamed to .m4a on completion
-     * so UploadWorker never touches an in-progress file.
-     */
-    private inner class StreamingEncoder(private val finalFile: File) {
-        // Write to .tmp during encoding to prevent UploadWorker from touching it
-        private val tmpFile = File(finalFile.parent, finalFile.name + ".tmp")
-        private val codec: MediaCodec
-        private val muxer: MediaMuxer
-        private var trackIndex = -1
-        private var muxerStarted = false
-        private val bufferInfo = MediaCodec.BufferInfo()
-        private var presentationTimeUs = 0L
-        private var totalFed = 0L
-
-        init {
-            val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, SAMPLE_RATE, 1).apply {
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, AAC_BIT_RATE)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
-            }
-            codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-            try {
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                codec.start()
-                muxer = MediaMuxer(tmpFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            } catch (e: Exception) {
-                try { codec.stop() } catch (_: Exception) {}
-                try { codec.release() } catch (_: Exception) {}
-                throw e
-            }
-        }
-
-        fun feed(pcmData: ByteArray, length: Int = pcmData.size) {
-            var pos = 0
-            var stalls = 0
-            while (pos < length) {
-                val inputIndex = codec.dequeueInputBuffer(1_000L)
-                if (inputIndex >= 0) {
-                    val inputBuffer = codec.getInputBuffer(inputIndex) ?: continue
-                    val size = minOf(length - pos, inputBuffer.capacity())
-                    inputBuffer.clear()
-                    inputBuffer.put(pcmData, pos, size)
-                    codec.queueInputBuffer(inputIndex, 0, size, presentationTimeUs, 0)
-                    presentationTimeUs += (size.toLong() * 1_000_000L) / (SAMPLE_RATE * 2)
-                    pos += size
-                    stalls = 0
-                } else {
-                    stalls++
-                    if (stalls > 50) {
-                        AppLog.e(TAG, "Encoder stalled — dropping ${pcmData.size - pos} bytes")
-                        break
-                    }
-                }
-                drainOutput(blocking = false)
-            }
-            totalFed += pos
-        }
-
-        fun complete(): File? {
-            AppLog.d(TAG, "Completing encoder: ${totalFed / 1024}KB PCM fed -> ${finalFile.name}")
-            val encodeStart = System.currentTimeMillis()
-
-            try {
-                var eosSent = false
-                for (i in 0 until 100) {
-                    val inputIndex = codec.dequeueInputBuffer(10_000L)
-                    if (inputIndex >= 0) {
-                        codec.queueInputBuffer(inputIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        eosSent = true
-                        break
-                    }
-                    drainOutput(blocking = false)
-                }
-                if (!eosSent) {
-                    AppLog.w(TAG, "Failed to send EOS after 100 attempts — file may be truncated")
-                }
-
-                drainOutput(blocking = true)
-
-                try { codec.stop() } catch (_: Exception) {}
-                try { codec.release() } catch (_: Exception) {}
-                try { muxer.stop() } catch (_: Exception) {}
-                try { muxer.release() } catch (_: Exception) {}
-
-                val elapsed = System.currentTimeMillis() - encodeStart
-                val ratio = if (totalFed > 0 && tmpFile.length() > 0)
-                    String.format("%.1fx", totalFed.toFloat() / tmpFile.length()) else "?"
-                AppLog.i(TAG, "Encoder completed: ${totalFed/1024}KB -> ${tmpFile.length()/1024}KB (${ratio} compression) in ${elapsed}ms")
-
-                if (tmpFile.length() > 0) {
-                    if (!tmpFile.renameTo(finalFile)) {
-                        AppLog.e(TAG, "Failed to rename ${tmpFile.name} -> ${finalFile.name}, trying copy")
-                        try {
-                            tmpFile.copyTo(finalFile, overwrite = true)
-                            tmpFile.delete()
-                        } catch (copyErr: Exception) {
-                            AppLog.e(TAG, "Copy fallback also failed", copyErr)
-                            return null
-                        }
-                    }
-                    return finalFile
-                }
-                tmpFile.delete()
-                return null
-
-            } catch (e: Exception) {
-                AppLog.e(TAG, "Encoder complete FAILED", e)
-                release()
-                tmpFile.delete()
-                return null
-            }
-        }
-
-        fun release() {
-            try { codec.stop() } catch (_: Exception) {}
-            try { codec.release() } catch (_: Exception) {}
-            try { muxer.stop() } catch (_: Exception) {}
-            try { muxer.release() } catch (_: Exception) {}
-            tmpFile.delete()
-        }
-
-        private fun drainOutput(blocking: Boolean) {
-            var iterations = 0
-            val maxIterations = if (blocking) 1000 else 100
-            while (iterations++ < maxIterations) {
-                val timeoutUs = if (blocking) 10_000L else 0L
-                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-                when {
-                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        trackIndex = muxer.addTrack(codec.outputFormat)
-                        muxer.start()
-                        muxerStarted = true
-                    }
-                    outputIndex >= 0 -> {
-                        val outputBuffer = codec.getOutputBuffer(outputIndex)
-                        if (outputBuffer == null) {
-                            codec.releaseOutputBuffer(outputIndex, false)
-                            continue
-                        }
-                        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
-                            bufferInfo.size = 0
-                        }
-                        if (bufferInfo.size > 0 && muxerStarted) {
-                            outputBuffer.position(bufferInfo.offset)
-                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                            muxer.writeSampleData(trackIndex, outputBuffer, bufferInfo)
-                        }
-                        codec.releaseOutputBuffer(outputIndex, false)
-                        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
-                    }
-                    else -> {
-                        if (!blocking) return
-                    }
-                }
-            }
-        }
-    }
-
     // ─── Record Loop ─────────────────────────────────────────────────────
 
     private suspend fun recordLoop() {
         val buffer = ShortArray(READ_BUFFER_SAMPLES)
-        var chunkStartTime = System.currentTimeMillis()
-        var lastVoiceTime = System.currentTimeMillis()
+        var chunkStartTime = android.os.SystemClock.elapsedRealtime()
+        var chunkWallTime = System.currentTimeMillis()
+        var nextStorageCheck = 0L
+        var lastVoiceTime = android.os.SystemClock.elapsedRealtime()
         var hasVoiceInChunk = false
         var chunkNumber = 0
         var readsSinceLastLog = 0
@@ -574,20 +415,21 @@ class RecordingService : Service() {
         var maxAmplSinceLastLog = 0
 
         val pcmByteBuffer = ByteArray(READ_BUFFER_SAMPLES * 2) // Pre-allocated — avoids GC in hot loop
-        var encoder: StreamingEncoder? = null
+        var encoder: AudioChunkEncoder? = null
         var pcmFed = 0L
 
         fun startNewChunk() {
             encoder?.release()
             encoder = null
 
-            chunkStartTime = System.currentTimeMillis()
+            chunkStartTime = android.os.SystemClock.elapsedRealtime()
+            chunkWallTime = System.currentTimeMillis()
             hasVoiceInChunk = false
             pcmFed = 0L
             chunkNumber++
             totalChunks++
 
-            wakeLock?.acquire()
+            wakeLock?.acquire(CHUNK_DURATION_MS + 5 * 60 * 1000L)
 
             AppLog.i(TAG, "New chunk #$chunkNumber")
         }
@@ -597,9 +439,13 @@ class RecordingService : Service() {
 
             while (currentCoroutineContext().isActive && recordingRequested()) {
                 currentCoroutineContext().ensureActive()
-                if (!hasEnoughDiskSpace()) {
-                    updateRecordingState(RecordingState.STORAGE_FULL)
-                    break
+                val storageNow = android.os.SystemClock.elapsedRealtime()
+                if (storageNow >= nextStorageCheck) {
+                    nextStorageCheck = storageNow + 5000L
+                    if (!hasEnoughDiskSpace()) {
+                        updateRecordingState(RecordingState.STORAGE_FULL)
+                        break
+                    }
                 }
                 val ar = audioRecord ?: break
                 val read = ar.read(buffer, 0, buffer.size)
@@ -627,7 +473,7 @@ class RecordingService : Service() {
                     if (abs > maxAmplitude) maxAmplitude = abs
                 }
                 if (maxAmplitude > maxAmplSinceLastLog) maxAmplSinceLastLog = maxAmplitude
-                val now = System.currentTimeMillis()
+                val now = android.os.SystemClock.elapsedRealtime()
 
                 if (maxAmplitude > VAD_THRESHOLD) {
                     lastVoiceTime = now
@@ -638,7 +484,7 @@ class RecordingService : Service() {
                 }
 
                 val silenceDuration = now - lastVoiceTime
-                if (silenceDuration < VAD_SILENCE_TIMEOUT_MS) {
+                if (hasVoiceInChunk && silenceDuration < VAD_SILENCE_TIMEOUT_MS) {
                     val pcmBytes = read * 2
                     for (i in 0 until read) {
                         pcmByteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
@@ -647,12 +493,12 @@ class RecordingService : Service() {
 
                     if (encoder == null && hasEnoughDiskSpace()) {
                         try {
-                            val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(chunkStartTime))
-                            val aacFile = File(getChunkDir(), "chunk_${timestamp}.m4a")
-                            encoder = StreamingEncoder(aacFile)
+                            val timestamp = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss-SSS", Locale.US).format(Date(chunkWallTime))
+                            val aacFile = File(getChunkDir(), "chunk_${timestamp}_${UUID.randomUUID()}.m4a")
+                            encoder = AudioChunkEncoder(aacFile, SAMPLE_RATE, AAC_BIT_RATE)
                             AppLog.d(TAG, "Encoder created for chunk #$chunkNumber: ${aacFile.name}")
                         } catch (e: Exception) {
-                            AppLog.e(TAG, "Failed to create encoder for chunk #$chunkNumber", e)
+                            throw IllegalStateException("Cannot create AAC encoder", e)
                         }
                     }
 
@@ -662,9 +508,7 @@ class RecordingService : Service() {
                             pcmFed += pcmBytes
                             totalBytesEncoded += pcmBytes
                         } catch (e: Exception) {
-                            AppLog.e(TAG, "Encoder feed error — releasing encoder", e)
-                            enc.release()
-                            encoder = null
+                            throw IllegalStateException("Cannot feed AAC encoder", e)
                         }
                     }
                 } else {
@@ -688,7 +532,7 @@ class RecordingService : Service() {
                         if (encoded != null) {
                             AppLog.i(TAG, "Chunk finalized: ${encoded.name} (${encoded.length()/1024}KB)")
                         } else {
-                            AppLog.e(TAG, "Encoding failed for chunk #$chunkNumber — data lost")
+                            throw IllegalStateException("Chunk finalization failed; temporary audio preserved")
                         }
                     } else {
                         chunksWithoutVoice++
@@ -731,57 +575,6 @@ class RecordingService : Service() {
         }
     }
 
-    // ─── Upload Scheduling ───────────────────────────────────────────────
-
-    private fun scheduleUploads() {
-        val wm = WorkManager.getInstance(this)
-
-        // Primary: upload on WiFi (every 60min)
-        val wifiConstraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.UNMETERED)
-            .build()
-        val wifiWork = PeriodicWorkRequestBuilder<UploadWorker>(
-            UPLOAD_INTERVAL_MINUTES, TimeUnit.MINUTES
-        ).setConstraints(wifiConstraints).build()
-        wm.enqueueUniquePeriodicWork(
-            UploadWorker.WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
-            wifiWork
-        )
-
-        // Fallback: upload on any network (every 4h) — handles Bluetooth proxy when WiFi is off
-        val anyNetConstraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-        val fallbackWork = PeriodicWorkRequestBuilder<UploadWorker>(
-            UPLOAD_FALLBACK_INTERVAL_HOURS, TimeUnit.HOURS
-        ).setConstraints(anyNetConstraints).build()
-        wm.enqueueUniquePeriodicWork(
-            UPLOAD_FALLBACK_WORK_NAME,
-            ExistingPeriodicWorkPolicy.UPDATE,
-            fallbackWork
-        )
-
-        AppLog.i(TAG, "Upload scheduled: every ${UPLOAD_INTERVAL_MINUTES}min (WiFi) + every ${UPLOAD_FALLBACK_INTERVAL_HOURS}h (any network)")
-    }
-
-    private fun triggerImmediateUpload() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
-        val oneTimeWork = OneTimeWorkRequestBuilder<UploadWorker>()
-            .setConstraints(constraints)
-            .build()
-
-        WorkManager.getInstance(this).enqueueUniqueWork(
-            "upload_immediate",
-            ExistingWorkPolicy.REPLACE,
-            oneTimeWork
-        )
-        AppLog.i(TAG, "One-time upload enqueued for remaining files")
-    }
-
     // ─── Status & Logging ────────────────────────────────────────────────
 
     private fun logPeriodicStatus() {
@@ -792,7 +585,7 @@ class RecordingService : Service() {
         AppLog.i(TAG, "  Recording: $isRecording | AudioRecord state: ${audioRecord?.state}")
         AppLog.i(TAG, "  Chunks: $totalChunks total ($chunksWithVoice voice, $chunksWithoutVoice silent)")
         AppLog.i(TAG, "  PCM encoded: ${totalBytesEncoded/1024/1024}MB | Silence skipped: ${totalSilenceSkipped/1024/1024}MB")
-        AppLog.i(TAG, "  Local files: $localFiles ($localMB MB) — uploads every ${UPLOAD_INTERVAL_MINUTES}min")
+        AppLog.i(TAG, "  Local files: $localFiles ($localMB MB) — uploads every ${UploadScheduler.UPLOAD_INTERVAL_MINUTES}min")
         AppLog.i(TAG, "  Read errors: $totalReadErrors")
         AppLog.i(TAG, "  WakeLock held: ${wakeLock?.isHeld}")
         AppLog.i(TAG, "  Free space: ${getChunkDir().usableSpace / 1024 / 1024}MB")
@@ -824,15 +617,6 @@ class RecordingService : Service() {
                 AudioManager.MODE_CALL_SCREENING -> "CALL_SCREENING"; else -> "mode=${am.mode}"
             }
             AppLog.d(TAG, "Audio: mode=$mode micMuted=${am.isMicrophoneMute} musicActive=${am.isMusicActive}")
-            try {
-                @Suppress("DEPRECATION")
-                val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-                val cs = when (tm.callState) {
-                    TelephonyManager.CALL_STATE_IDLE -> "IDLE"; TelephonyManager.CALL_STATE_RINGING -> "RINGING"
-                    TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"; else -> "unknown"
-                }
-                AppLog.d(TAG, "Phone: callState=$cs")
-            } catch (_: Exception) { AppLog.d(TAG, "Phone: unable to read") }
         } catch (_: Exception) { AppLog.d(TAG, "Audio: unable to read") }
     }
 
@@ -846,15 +630,24 @@ class RecordingService : Service() {
         for (tmp in tmpFiles) {
             val ageMs = now - tmp.lastModified()
             if (ageMs > STALE_TMP_THRESHOLD_MS && tmp.length() > 0) {
-                // Old .tmp with data — likely a completed encode that crashed before rename.
-                // Recover by renaming to .m4a so it gets uploaded.
+                // MP4 headers may never have been finalized. Only publish readable audio.
+                val extractor = MediaExtractor()
+                val valid = try {
+                    extractor.setDataSource(tmp.absolutePath)
+                    (0 until extractor.trackCount).any {
+                        extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+                    }
+                } catch (_: Exception) { false } finally { extractor.release() }
+                if (!valid) {
+                    AppLog.w(TAG, "Keeping incomplete crash recording ${tmp.name}; it is not uploadable")
+                    continue
+                }
                 val m4aName = tmp.name.removeSuffix(".tmp")
                 val recovered = File(dir, m4aName)
-                if (tmp.renameTo(recovered)) {
+                if (!recovered.exists() && tmp.renameTo(recovered)) {
                     AppLog.i(TAG, "Recovered orphaned .tmp → ${recovered.name} (${tmp.length()/1024}KB, age ${ageMs/1000}s)")
                 } else {
-                    AppLog.w(TAG, "Failed to recover ${tmp.name} — deleting")
-                    tmp.delete()
+                    AppLog.w(TAG, "Failed to recover ${tmp.name} — preserving")
                 }
             } else if (ageMs > STALE_TMP_THRESHOLD_MS) {
                 // Old but empty — just delete

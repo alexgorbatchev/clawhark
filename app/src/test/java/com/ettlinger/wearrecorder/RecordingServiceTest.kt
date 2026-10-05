@@ -37,6 +37,7 @@ import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 @Config(sdk = [34])
 class RecordingServiceTest {
     private lateinit var service: RecordingService
+    private var workInitialized = false
 
     @Before
     fun setUp() {
@@ -50,6 +51,7 @@ class RecordingServiceTest {
     fun tearDown() {
         setRecordingRequested(false)
         service.onDestroy()
+        if (workInitialized) WorkManagerTestInitHelper.closeWorkDatabase()
         service.getChunkDir().deleteRecursively()
     }
 
@@ -85,6 +87,17 @@ class RecordingServiceTest {
         invokeRecordLoop()
         assertTrue("Unuploaded audio must never be evicted", queued.exists())
         assertEquals(RecordingService.MAX_LOCAL_STORAGE_BYTES + 1, queued.length())
+    }
+
+    @Test
+    fun abandonedCaptureWakeLockExpires() {
+        RecordingService::class.java.getDeclaredMethod("acquireRecordingWakeLock")
+            .apply { isAccessible = true }.invoke(service)
+        val lock = RecordingService::class.java.getDeclaredField("wakeLock")
+            .apply { isAccessible = true }.get(service) as android.os.PowerManager.WakeLock
+        assertTrue(lock.isHeld)
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(21, java.util.concurrent.TimeUnit.MINUTES)
+        assertFalse("A stalled capture must not hold the CPU awake indefinitely", lock.isHeld)
     }
 
     @Test
@@ -235,6 +248,53 @@ class RecordingServiceTest {
         setField("scope", scope)
         WorkManagerTestInitHelper.initializeTestWorkManager(service, Configuration.Builder()
             .setExecutor(SynchronousExecutor()).build())
+        workInitialized = true
+    }
+
+    @Test
+    fun finalUploadWaitsForRecordingCleanup() = runTest {
+        prepareSession(backgroundScope)
+        val cleanup = backgroundScope.launch {
+            try { kotlinx.coroutines.awaitCancellation() } finally {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    kotlinx.coroutines.delay(1000)
+                    File(service.getChunkDir(), "chunk_final.m4a").writeText("final audio")
+                }
+            }
+        }
+        setField("recordJob", cleanup)
+        runCurrent()
+        service.onStartCommand(android.content.Intent(service, RecordingService::class.java)
+            .setAction(RecordingService.ACTION_STOP), 0, 1)
+        runCurrent()
+        val wm = androidx.work.WorkManager.getInstance(service)
+        assertTrue("Do not enqueue final upload while encoder cleanup is pending",
+            wm.getWorkInfosForUniqueWork("upload_immediate").get().isEmpty())
+        advanceTimeBy(1000)
+        runCurrent()
+        assertTrue(File(service.getChunkDir(), "chunk_final.m4a").exists())
+        assertFalse(wm.getWorkInfosForUniqueWork("upload_immediate").get().isEmpty())
+    }
+
+    @Test
+    fun finalUploadIsQueuedEvenWhenAnotherImmediateUploadExists() = runTest {
+        prepareSession(backgroundScope)
+        UploadScheduler.uploadPending(service)
+        UploadScheduler.uploadPending(service)
+        assertEquals(2, androidx.work.WorkManager.getInstance(service)
+            .getWorkInfosForUniqueWork("upload_immediate").get().size)
+    }
+
+    @Test
+    fun corruptCrashFileIsPreservedAndNeverPublishedForUpload() {
+        val temporary = File(service.getChunkDir(), "chunk_crash.m4a.tmp").apply {
+            writeText("not a finalized MP4")
+            setLastModified(System.currentTimeMillis() - 30 * 60 * 1000)
+        }
+        RecordingService::class.java.getDeclaredMethod("cleanupOrphanedTmpFiles")
+            .apply { isAccessible = true }.invoke(service)
+        assertTrue("Keep incomplete audio for diagnosis or recovery", temporary.exists())
+        assertFalse(File(service.getChunkDir(), "chunk_crash.m4a").exists())
     }
 
     private fun oversizedRecording(): File = File(service.getChunkDir(), "chunk_pending.m4a").also {

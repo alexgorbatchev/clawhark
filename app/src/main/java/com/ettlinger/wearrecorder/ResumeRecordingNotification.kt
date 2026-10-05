@@ -10,7 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 
-/** A user action is required to regain foreground microphone access after reboot. */
+/** Offers a user action to resume when Android rejects automatic microphone access. */
 object ResumeRecordingNotification {
     private const val CHANNEL_ID = "clawhark_resume"
     private const val NOTIFICATION_ID = 2

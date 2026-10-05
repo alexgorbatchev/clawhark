@@ -1,11 +1,13 @@
 package com.ettlinger.wearrecorder
 
+import android.app.ForegroundServiceStartNotAllowedException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 
 /**
- * Auto-restarts recording after watch reboot if the user had recording enabled.
+ * Attempts automatic restart and prompts the user if Android rejects background capture.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -26,7 +28,21 @@ class BootReceiver : BroadcastReceiver() {
             // running Wear OS 7; Android documents restrictions and exceptions for this behavior:
             // https://developer.android.com/develop/background-work/services/fgs/service-types#microphone
             val serviceIntent = Intent(context, RecordingService::class.java)
-            context.startForegroundService(serviceIntent)
+            try {
+                if (Build.VERSION.SDK_INT >= 31) {
+                    try {
+                        context.startForegroundService(serviceIntent)
+                    } catch (error: ForegroundServiceStartNotAllowedException) {
+                        AppLog.w("Boot", "Background service start rejected — open ClawHark to resume")
+                        ResumeRecordingNotification.show(context)
+                    }
+                } else {
+                    context.startForegroundService(serviceIntent)
+                }
+            } catch (error: SecurityException) {
+                AppLog.w("Boot", "Background microphone permission rejected — open ClawHark to resume")
+                ResumeRecordingNotification.show(context)
+            }
         }
     }
 }

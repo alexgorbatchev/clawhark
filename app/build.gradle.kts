@@ -21,7 +21,7 @@ android {
         create("release") {
             val keyPropsFile = rootProject.file("keystore.properties")
             if (keyPropsFile.exists()) {
-                val props = Properties().apply { load(keyPropsFile.inputStream()) }
+                val props = Properties().apply { keyPropsFile.inputStream().use { load(it) } }
                 storeFile = file(props["storeFile"] as String)
                 storePassword = props["storePassword"] as String
                 keyAlias = props["keyAlias"] as String
@@ -34,7 +34,7 @@ android {
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
         }
     }
 
@@ -50,17 +50,30 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+
+    packaging {
+        resources.excludes += "META-INF/INDEX.LIST" // JVM JAR index; unused by Android.
+        resources.merges += "META-INF/DEPENDENCIES"
+    }
 }
 
 dependencies {
-    implementation("androidx.wear:wear:1.3.0")
+    // Android uses NetHttpTransport; Apache transports target desktop/server Java.
+    implementation("com.google.apis:google-api-services-drive:v3-rev20260916-2.0.0") {
+        exclude(group = "org.apache.httpcomponents")
+        exclude(module = "google-http-client-apache-v2")
+    }
+    implementation("com.google.http-client:google-http-client-gson:2.2.0") {
+        exclude(group = "org.apache.httpcomponents")
+    }
+    implementation("androidx.wear:wear:1.4.0")
     implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.activity:activity-ktx:1.8.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("androidx.work:work-runtime-ktx:2.9.0")
-    implementation("androidx.security:security-crypto:1.0.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.security:security-crypto:1.1.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.11.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
-    testImplementation("androidx.work:work-testing:2.9.0")
+    testImplementation("androidx.work:work-testing:2.9.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

@@ -1,198 +1,128 @@
 package com.ettlinger.wearrecorder
 
+import android.util.AtomicFile
+import com.google.api.client.http.FileContent
+import com.google.api.client.http.HttpResponseException
+import com.google.api.client.http.javanet.NetHttpTransport
+import com.google.api.client.json.gson.GsonFactory
+import com.google.api.services.drive.Drive
+import com.google.api.services.drive.model.File as DriveFile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileNotFoundException
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.UUID
+import java.io.IOException
+import java.security.MessageDigest
 
-/**
- * Uploads files to a "ClawHark" folder in Google Drive.
- * Uses AuthManager for OAuth tokens — no credentials stored here.
- */
-class DriveUploader {
-
+/** Uses the Drive SDK's resumable uploader and persistent IDs for safe retries. */
+class DriveUploader(private val apiRoot: String = "https://www.googleapis.com") {
     companion object {
-        const val TAG = "Drive"
+        private const val TAG = "Drive"
         const val FOLDER_NAME = "ClawHark"
-        private const val CONNECT_TIMEOUT = 30_000
-        private const val READ_TIMEOUT = 120_000
+        private const val FILE_FIELDS = "id,name,size,md5Checksum"
+        fun receipt(file: File) = AtomicFile(File(file.parentFile,
+            file.name.removeSuffix(".uploading") + ".drive-id"))
     }
 
     private var folderId: String? = null
 
-    private suspend fun getOrCreateFolder(token: String): String? = withContext(Dispatchers.IO) {
-        folderId?.let {
-            AppLog.d(TAG, "Using cached folder ID: $it")
-            return@withContext it
-        }
-
-        AppLog.d(TAG, "Looking up Drive folder '$FOLDER_NAME'")
-
-        // Search for existing folder
-        var conn: HttpURLConnection? = null
-        try {
-            val searchUrl = "https://www.googleapis.com/drive/v3/files?q=name%3D%27$FOLDER_NAME%27+and+mimeType%3D%27application%2Fvnd.google-apps.folder%27+and+trashed%3Dfalse&fields=files(id)"
-            conn = URL(searchUrl).openConnection() as HttpURLConnection
-            conn.setRequestProperty("Authorization", "Bearer $token")
-            conn.connectTimeout = CONNECT_TIMEOUT
-            conn.readTimeout = READ_TIMEOUT
-
-            val code = conn.responseCode
-            if (code == 200) {
-                val resp = conn.inputStream.bufferedReader().readText()
-                val files = JSONObject(resp).getJSONArray("files")
-                if (files.length() > 0) {
-                    folderId = files.getJSONObject(0).getString("id")
-                    AppLog.i(TAG, "Found existing folder: $folderId")
-                    return@withContext folderId
-                }
-                AppLog.d(TAG, "Folder not found — creating")
-            } else {
-                val error = conn.errorStream?.bufferedReader()?.readText() ?: "no body"
-                AppLog.e(TAG, "Folder search failed HTTP $code: $error")
-            }
-        } catch (e: Exception) {
-            AppLog.e(TAG, "Folder search error", e)
-            return@withContext null
-        } finally {
-            conn?.disconnect()
-        }
-
-        // Create folder
-        var createConn: HttpURLConnection? = null
-        try {
-            createConn = URL("https://www.googleapis.com/drive/v3/files").openConnection() as HttpURLConnection
-            createConn.setRequestProperty("Authorization", "Bearer $token")
-            createConn.setRequestProperty("Content-Type", "application/json")
-            createConn.requestMethod = "POST"
-            createConn.doOutput = true
-            createConn.connectTimeout = CONNECT_TIMEOUT
-            createConn.readTimeout = READ_TIMEOUT
-
-            val body = JSONObject().apply {
-                put("name", FOLDER_NAME)
-                put("mimeType", "application/vnd.google-apps.folder")
-            }
-            OutputStreamWriter(createConn.outputStream).use { it.write(body.toString()) }
-
-            val createCode = createConn.responseCode
-            if (createCode in 200..299) {
-                val resp = createConn.inputStream.bufferedReader().readText()
-                folderId = JSONObject(resp).getString("id")
-                AppLog.i(TAG, "Created folder: $folderId")
-            } else {
-                val error = createConn.errorStream?.bufferedReader()?.readText() ?: "no body"
-                AppLog.e(TAG, "Create folder failed HTTP $createCode: $error")
-            }
-        } catch (e: Exception) {
-            AppLog.e(TAG, "Create folder error", e)
-        } finally {
-            createConn?.disconnect()
-        }
-        folderId
-    }
-
     suspend fun uploadFile(file: File): Boolean = withContext(Dispatchers.IO) {
-        val fileSize = file.length()
-        AppLog.i(TAG, "=== UPLOAD START: ${file.name} (${fileSize/1024}KB) ===")
-
-        val token = AuthManager.getAccessToken()
-        if (token == null) {
-            AppLog.e(TAG, "Upload aborted: no access token")
-            return@withContext false
-        }
-
-        val folder = getOrCreateFolder(token)
-        if (folder == null) {
-            AppLog.e(TAG, "Upload aborted: no folder ID")
-            return@withContext false
-        }
-
-        var conn: HttpURLConnection? = null
+        if (!file.isFile || file.length() == 0L) return@withContext false
+        val token = AuthManager.getAccessToken() ?: return@withContext false
+        val session = AuthManager.authorizationSession() ?: return@withContext false
+        val context = currentCoroutineContext()
+        val drive = Drive.Builder(NetHttpTransport(), GsonFactory.getDefaultInstance()) { request ->
+            request.connectTimeout = 30_000
+            request.readTimeout = 120_000
+            request.numberOfRetries = 0 // WorkManager owns persistent retry/backoff.
+            request.isLoggingEnabled = false
+            request.headers.authorization = "Bearer $token"
+            request.interceptor = com.google.api.client.http.HttpExecuteInterceptor {
+                context.ensureActive()
+                if (AuthManager.authorizationSession() != session) throw CancellationException("Account disconnected")
+            }
+        }.setRootUrl("$apiRoot/").setApplicationName("ClawHark").build()
+        val originalName = file.name.removeSuffix(".uploading")
         try {
-            val boundary = "----ClawHark${UUID.randomUUID()}"
-            val url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
-            conn = URL(url).openConnection() as HttpURLConnection
-            conn.setRequestProperty("Authorization", "Bearer $token")
-            conn.setRequestProperty("Content-Type", "multipart/related; boundary=$boundary")
-            conn.requestMethod = "POST"
-            conn.doOutput = true
-            conn.connectTimeout = CONNECT_TIMEOUT
-            conn.readTimeout = READ_TIMEOUT
-            conn.setChunkedStreamingMode(0)
-
-            val metadata = JSONObject().apply {
-                put("name", file.name)
-                put("parents", JSONArray().put(folder))
+            val folder = folderId ?: run {
+                val found = drive.files().list()
+                    .setQ("name='$FOLDER_NAME' and mimeType='application/vnd.google-apps.folder' and trashed=false")
+                    .setPageSize(1).setFields("files(id)").execute().files.orEmpty()
+                val id = found.firstOrNull()?.id ?: drive.files().create(
+                    DriveFile().setName(FOLDER_NAME).setMimeType("application/vnd.google-apps.folder")
+                ).setFields("id").execute().id
+                checkNotNull(id).also { folderId = it }
             }
-
-            AppLog.d(TAG, "Starting multipart upload to Drive...")
-            val uploadStart = System.currentTimeMillis()
-
-            // Use raw OutputStream throughout to avoid BufferedWriter/OutputStream mixing issues
-            conn.outputStream.buffered().use { out ->
-                fun writeStr(s: String) { out.write(s.toByteArray(Charsets.UTF_8)) }
-
-                writeStr("--$boundary\r\n")
-                writeStr("Content-Type: application/json; charset=UTF-8\r\n\r\n")
-                writeStr(metadata.toString())
-                writeStr("\r\n--$boundary\r\n")
-                writeStr("Content-Type: audio/mp4\r\n\r\n")
-
-                var uploaded = 0L
-                FileInputStream(file).use { fis ->
-                    val buf = ByteArray(8192)
-                    var n: Int
-                    while (fis.read(buf).also { n = it } != -1) {
-                        out.write(buf, 0, n)
-                        uploaded += n
-                    }
+            val state = receipt(file)
+            val saved = if (state.baseFile.exists()) JSONObject(state.readFully().toString(Charsets.UTF_8)) else null
+            val id = if (saved?.optString("session") == session) saved.getString("id") else {
+                val generated = drive.files().generateIds().setCount(1).setSpace("drive").execute().ids.single()
+                val stream = state.startWrite()
+                try {
+                    stream.write(JSONObject().put("id", generated).put("session", session).toString().toByteArray())
+                    stream.fd.sync()
+                    state.finishWrite(stream)
+                } catch (error: Exception) {
+                    state.failWrite(stream)
+                    throw error
                 }
-                AppLog.d(TAG, "Sent ${uploaded/1024}KB of file data")
-
-                writeStr("\r\n--$boundary--\r\n")
-                out.flush()
-            }
-
-            val code = conn.responseCode
-            val elapsed = System.currentTimeMillis() - uploadStart
-            val speedKBps = if (elapsed > 0) (fileSize / 1024.0) / (elapsed / 1000.0) else 0.0
-
-            if (code in 200..299) {
-                val resp = conn.inputStream.bufferedReader().readText()
-                val driveFileId = try { JSONObject(resp).getString("id") } catch (_: Exception) { "?" }
-                AppLog.i(TAG, "=== UPLOAD SUCCESS === ${file.name} -> Drive ID $driveFileId | ${elapsed}ms | ${String.format("%.0f", speedKBps)} KB/s")
-                true
-            } else {
-                val error = conn.errorStream?.bufferedReader()?.readText() ?: "no body"
-                AppLog.e(TAG, "=== UPLOAD FAILED === HTTP $code after ${elapsed}ms: $error")
-                if (code == 401) {
-                    AppLog.e(TAG, "Token expired during upload — invalidating cached token")
-                    AuthManager.invalidateAccessToken()
+                // AtomicFile can log a failed final rename without throwing. Do not upload
+                // unless the receipt is actually readable at its committed destination.
+                val persisted = JSONObject(state.readFully().toString(Charsets.UTF_8))
+                check(persisted.getString("id") == generated && persisted.getString("session") == session) {
+                    "Drive upload receipt was not committed"
                 }
-                false
+                generated
             }
-        } catch (e: FileNotFoundException) {
-            AppLog.w(TAG, "File deleted before upload: ${file.name} — skipping")
-            true // Return true so UploadWorker doesn't count it as a failure
-        } catch (e: java.net.ConnectException) {
-            AppLog.e(TAG, "=== UPLOAD FAILED === Connection error (no WiFi?)", e)
+            val checksum = MessageDigest.getInstance("MD5")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    context.ensureActive()
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    checksum.update(buffer, 0, count)
+                }
+            }
+            val expectedChecksum = checksum.digest().joinToString("") { "%02x".format(it) }
+            val metadata = DriveFile().setId(id).setName(originalName)
+                .setMimeType("audio/mp4").setParents(listOf(folder))
+            val create = drive.files().create(metadata, FileContent("audio/mp4", file)).setFields(FILE_FIELDS)
+                .setDisableGZipContent(true)
+            create.mediaHttpUploader.apply {
+                isDirectUploadEnabled = false
+                chunkSize = 256 * 1024
+                disableGZipContent = true
+                setProgressListener { context.ensureActive() }
+            }
+            val remote = try {
+                create.execute()
+            } catch (error: HttpResponseException) {
+                if (error.statusCode != 409) throw error
+                // A lost acknowledgement can leave the ID already uploaded. Verify it before cleanup.
+                drive.files().get(id).setFields(FILE_FIELDS).execute()
+            }
+            context.ensureActive()
+            val verified = remote.id == id && remote.name == originalName &&
+                remote.getSize() == file.length() && remote.md5Checksum == expectedChecksum
+            if (!verified) AppLog.e(TAG, "Drive acknowledgement did not match local audio; preserving $originalName")
+            verified
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: HttpResponseException) {
+            if (error.statusCode == 401) AuthManager.invalidateAccessToken()
+            if (error.statusCode == 404) folderId = null
+            AppLog.e(TAG, "Drive upload failed HTTP ${error.statusCode}; preserving $originalName")
             false
-        } catch (e: java.net.SocketTimeoutException) {
-            AppLog.e(TAG, "=== UPLOAD FAILED === Timeout (slow connection)", e)
+        } catch (error: IOException) {
+            AppLog.e(TAG, "Drive upload interrupted; preserving $originalName")
             false
-        } catch (e: Exception) {
-            AppLog.e(TAG, "=== UPLOAD FAILED === Unexpected error", e)
+        } catch (error: Exception) {
+            AppLog.e(TAG, "Drive upload failed; preserving $originalName", error)
             false
-        } finally {
-            conn?.disconnect()
         }
     }
 }

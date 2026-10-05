@@ -4,7 +4,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/clawhark_bg">
+>
 
     <!-- Auth section (shown when not linked to Drive) -->
     <LinearLayout
@@ -20,7 +20,7 @@
             android:id="@+id/authTitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Link Google Drive"
+            android:text="@string/link_title"
             android:textColor="#FFFFFF"
             android:textSize="14sp"
             android:textStyle="bold" />
@@ -29,7 +29,7 @@
             android:id="@+id/authStatus"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Tap to connect"
+            android:text="@string/tap_connect"
             android:textColor="#BBBBBB"
             android:textSize="16sp"
             android:textStyle="bold"
@@ -53,10 +53,10 @@
             android:id="@+id/authBtn"
             android:layout_width="match_parent"
             android:layout_height="52dp"
-            android:text="LINK"
+            android:text="@string/link"
             android:textSize="14sp"
             android:textStyle="bold"
-            android:contentDescription="Link Google Drive account"
+            android:contentDescription="@string/link_account"
             android:layout_marginTop="8dp" />
     </LinearLayout>
 
@@ -74,7 +74,7 @@
             android:id="@+id/statusText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="STOPPED"
+            android:text="@string/stopped"
             android:textColor="#BBBBBB"
             android:textSize="16sp"
             android:textStyle="bold"
@@ -84,18 +84,18 @@
             android:id="@+id/toggleBtn"
             android:layout_width="100dp"
             android:layout_height="100dp"
-            android:text="START"
+            android:text="@string/start"
             android:textSize="16sp"
             android:textStyle="bold"
             android:textColor="#FFFFFF"
-            android:contentDescription="Start recording"
+            android:contentDescription="@string/start_recording"
             android:background="@drawable/circle_button" />
 
         <TextView
             android:id="@+id/infoText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Tap to record"
+            android:text="@string/tap_record"
             android:textColor="#BBBBBB"
             android:textSize="14sp"
             android:textAlignment="center"
