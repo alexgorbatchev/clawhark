@@ -1,6 +1,5 @@
 package com.ettlinger.wearrecorder
 
-import android.Manifest
 import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
@@ -23,7 +22,6 @@ class BootReceiverTest {
     @Before
     fun setUp() {
         application = RuntimeEnvironment.getApplication()
-        shadowOf(application).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
         // Exercise the receiver with native SharedPreferences without requiring a hardware keystore.
         val prefs = application.getSharedPreferences("test_auth", Context.MODE_PRIVATE)
         prefs.edit().putString("refresh_token", "test-only-token").commit()
@@ -37,18 +35,14 @@ class BootReceiverTest {
     }
 
     @Test
-    fun rebootPromptsUserInsteadOfStartingMicrophoneInBackground() {
+    fun rebootStartsRecordingWhenPreviouslyEnabled() {
         BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
-        assertNull("Boot receivers cannot start microphone foreground services", shadowOf(application).nextStartedService)
-        val notifications = application.getSystemService(NotificationManager::class.java).activeNotifications
-        assertEquals(1, notifications.size)
-        assertNotNull(notifications.single().notification.contentIntent)
-        notifications.single().notification.contentIntent.send()
-        assertEquals(MainActivity::class.java.name, shadowOf(application).nextStartedActivity.component?.className)
+        assertEquals(RecordingService::class.java.name, shadowOf(application).nextStartedService?.component?.className)
+        assertEquals(0, application.getSystemService(NotificationManager::class.java).activeNotifications.size)
     }
 
     @Test
-    fun explicitStopDoesNotProduceResumePrompt() {
+    fun explicitStopDoesNotRestartRecording() {
         setRecordingRequested(false)
         BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
         assertNull(shadowOf(application).nextStartedService)
@@ -63,8 +57,8 @@ class BootReceiverTest {
     }
 
     @Test
-    fun missingNotificationPermissionDoesNotStartMicrophoneOrCrash() {
-        shadowOf(application).denyPermissions(Manifest.permission.POST_NOTIFICATIONS)
+    fun signedOutDoesNotRestartRecording() {
+        application.getSharedPreferences("test_auth", Context.MODE_PRIVATE).edit().clear().commit()
         BootReceiver().onReceive(application, Intent(Intent.ACTION_BOOT_COMPLETED))
         assertNull(shadowOf(application).nextStartedService)
         assertEquals(0, application.getSystemService(NotificationManager::class.java).activeNotifications.size)

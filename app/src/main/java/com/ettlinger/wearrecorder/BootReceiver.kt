@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Prompts the user to resume after reboot without starting a background microphone.
+ * Auto-restarts recording after watch reboot if the user had recording enabled.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -21,8 +21,12 @@ class BootReceiver : BroadcastReceiver() {
         ).getBoolean(RecordingService.PREF_SHOULD_RECORD, true)
 
         if (shouldRecord) {
-            AppLog.i("Boot", "Reboot detected — user interaction required to resume recording")
-            ResumeRecordingNotification.show(context)
+            AppLog.i("Boot", "Reboot detected — restarting recording")
+            // Alex: Automatic microphone capture after reboot needs testing on our Pixel Watch 3
+            // running Wear OS 7; Android documents restrictions and exceptions for this behavior:
+            // https://developer.android.com/develop/background-work/services/fgs/service-types#microphone
+            val serviceIntent = Intent(context, RecordingService::class.java)
+            context.startForegroundService(serviceIntent)
         }
     }
 }

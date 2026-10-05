@@ -29,7 +29,7 @@ ClawHark records your day in the background, filters out silence, uploads to you
 | 🎙️ **Background recording** | Foreground service with wake lock — continues with the screen off |
 | 🔇 **Voice Activity Detection** | Only saves audio when someone is speaking — saves battery and storage |
 | ☁️ **Auto Google Drive upload** | 15-min AAC/M4A chunks; uploads scheduled hourly on unmetered networks, with a 4-hour fallback on any connection |
-| 🔄 **Restart reminder** | A notification prompts you to reopen the app after watch restart |
+| 🔄 **Boot persistence** | Attempts to resume recording automatically after watch restart when previously enabled; physical reboot testing is pending |
 | 🎯 **One-button UI** | Tap to start, tap twice to stop. That's it. |
 | 📱 **No companion app** | Fully standalone on the watch |
 | 🔒 **Privacy first** | `drive.file` scope — can only see its own files. No analytics, no tracking |
@@ -98,7 +98,7 @@ Linking Drive starts recording automatically. The app can record with the screen
 - **RECORDING:** the microphone capture session is running.
 - **RECOVERING MIC:** capture was interrupted. The app recreates the microphone and retries with a delay capped at one minute. STOP still cancels recovery.
 - **STORAGE FULL:** capture pauses while preserving pending recordings. Uploads remain scheduled, and recording resumes automatically when space becomes available. The 500 MiB limit includes completed files, active chunks, and files being uploaded; capture also pauses when free disk space drops below 50 MiB.
-- **After reboot:** tap the resume notification or open ClawHark manually. Android restricts starting a microphone foreground service from a boot receiver. If notification permission is denied, no reminder can be shown.
+- **After reboot:** the boot receiver attempts to resume recording automatically if it was previously enabled. This behavior still needs testing on the Pixel Watch 3 running Wear OS 7 because Android documents microphone foreground-service restrictions and exceptions. If capture does not resume, open ClawHark manually. See [Android's microphone service documentation](https://developer.android.com/develop/background-work/services/fgs/service-types#microphone).
 - **To stop:** tap STOP twice within three seconds. The stopped preference is preserved across reopening and reboot. Long-press the recording button to sign out.
 
 Check the `ClawHark/` folder in Drive daily and play a recent recording containing speech. Voice detection filters silence; uploads are scheduled background work and can be delayed by network availability or the operating system. Keep the watch charged and give it regular network access.
@@ -113,7 +113,7 @@ With JDK 17 and Android SDK API 34 installed, run:
 ./gradlew testDebugUnitTest assembleDebug lintDebug
 ```
 
-The regression tests exercise recording failures, recovery cancellation, storage pressure and resumption, permission handling, and reboot reminders using Robolectric and coroutine virtual time. Physical-watch testing is still needed for battery life and device-specific microphone interruptions.
+The regression tests exercise recording failures, recovery cancellation, storage pressure and resumption, permission handling, and boot receiver start decisions using Robolectric and coroutine virtual time. Physical-watch testing is still needed for automatic recording after reboot, battery life, and device-specific microphone interruptions.
 
 ## 🤖 Using with OpenClaw
 
