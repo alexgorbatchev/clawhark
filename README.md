@@ -26,7 +26,7 @@ ClawHark records your day in the background, filters out silence, uploads to you
 
 | Feature | Details |
 |---------|---------|
-| 🎙️ **Background recording** | Foreground service with wake lock — continues with the screen off |
+| 🎙️ **Always-on recording** | Foreground service with wake lock — continues with the screen off |
 | 🔇 **Voice Activity Detection** | Only saves audio when someone is speaking — saves battery and storage |
 | ☁️ **Auto Google Drive upload** | 15-min AAC/M4A chunks; uploads scheduled hourly on unmetered networks, with a 4-hour fallback on any connection |
 | 🔄 **Boot persistence** | Attempts to resume recording automatically after watch restart when previously enabled; physical reboot testing is pending |
@@ -92,6 +92,8 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 Open **ClawHark** on your watch and **Link** your Google Drive. Recording starts automatically once microphone permission is granted. If you previously stopped recording, tap **Start** to resume.
 
 ### Keeping recording active
+
+Always-on recording means ClawHark keeps recording until you stop it. Capture can be interrupted by microphone failures, missing permission, or storage pressure. The app retries microphone failures and resumes after storage becomes available; restoring microphone permission requires user action. Automatic recording after reboot still needs testing on the Pixel Watch 3 running Wear OS 7.
 
 Linking Drive starts recording automatically. The app can record with the screen off; keep microphone and notification permissions enabled and allow the background battery exemption when prompted.
 
