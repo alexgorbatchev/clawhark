@@ -26,17 +26,17 @@ ClawHark records your day in the background, filters out silence, uploads to you
 
 | Feature | Details |
 |---------|---------|
-| 🎙️ **Always-on recording** | Foreground service with wake lock — survives screen off and reboots |
+| 🎙️ **Background recording** | Foreground service with wake lock — continues with the screen off |
 | 🔇 **Voice Activity Detection** | Only saves audio when someone is speaking — saves battery and storage |
-| ☁️ **Auto Google Drive upload** | 5-min WAV chunks upload over WiFi, auto-deleted after |
-| 🔄 **Boot persistence** | Recording resumes automatically after watch restart |
+| ☁️ **Auto Google Drive upload** | 15-min AAC/M4A chunks; uploads scheduled hourly on unmetered networks, with a 4-hour fallback on any connection |
+| 🔄 **Restart reminder** | A notification prompts you to reopen the app after watch restart |
 | 🎯 **One-button UI** | Tap to start, tap twice to stop. That's it. |
 | 📱 **No companion app** | Fully standalone on the watch |
 | 🔒 **Privacy first** | `drive.file` scope — can only see its own files. No analytics, no tracking |
 
 ## 🔄 How It Works
 
-> **Watch** → records 24/7 with VAD → **Google Drive** → auto-uploads 5-min chunks → **Your computer** → pulls, transcribes, feeds to AI
+> **Watch** → records with VAD → **Google Drive** → uploads 15-min M4A chunks → **Your computer** → pulls, transcribes, feeds to AI
 
 1. **Record** — Watch captures audio continuously, Voice Activity Detection filters silence
 2. **Upload** — Chunks upload to a `ClawHark/` folder in your Google Drive
@@ -89,7 +89,31 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ### 4. Start recording
 
-Open **ClawHark** on your watch → **Link** your Google Drive → tap **Start**. Done.
+Open **ClawHark** on your watch and **Link** your Google Drive. Recording starts automatically once microphone permission is granted. If you previously stopped recording, tap **Start** to resume.
+
+### Keeping recording active
+
+Linking Drive starts recording automatically. The app can record with the screen off; keep microphone and notification permissions enabled and allow the background battery exemption when prompted.
+
+- **RECORDING:** the microphone capture session is running.
+- **RECOVERING MIC:** capture was interrupted. The app recreates the microphone and retries with a delay capped at one minute. STOP still cancels recovery.
+- **STORAGE FULL:** capture pauses while preserving pending recordings. Uploads remain scheduled, and recording resumes automatically when space becomes available. The 500 MiB limit includes completed files, active chunks, and files being uploaded; capture also pauses when free disk space drops below 50 MiB.
+- **After reboot:** tap the resume notification or open ClawHark manually. Android restricts starting a microphone foreground service from a boot receiver. If notification permission is denied, no reminder can be shown.
+- **To stop:** tap STOP twice within three seconds. The stopped preference is preserved across reopening and reboot. Long-press the recording button to sign out.
+
+Check the `ClawHark/` folder in Drive daily and play a recent recording containing speech. Voice detection filters silence; uploads are scheduled background work and can be delayed by network availability or the operating system. Keep the watch charged and give it regular network access.
+
+If your Google OAuth consent screen has an External audience and remains in Testing, Google issues Drive refresh tokens that expire after seven days. Reauthorize when needed, or review the project's publishing settings for ongoing use. Changing the audience/publishing configuration affects the other apps using that project. See [Google's refresh-token documentation](https://developers.google.com/identity/protocols/oauth2#expiration).
+
+### Verification
+
+With JDK 17 and Android SDK API 34 installed, run:
+
+```bash
+./gradlew testDebugUnitTest assembleDebug lintDebug
+```
+
+The regression tests exercise recording failures, recovery cancellation, storage pressure and resumption, permission handling, and reboot reminders using Robolectric and coroutine virtual time. Physical-watch testing is still needed for battery life and device-specific microphone interruptions.
 
 ## 🤖 Using with OpenClaw
 

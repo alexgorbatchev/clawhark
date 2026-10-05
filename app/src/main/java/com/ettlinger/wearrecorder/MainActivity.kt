@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var authBtn: Button
 
     private var authPollingJob: Job? = null
+    private var activityResumed = false
 
     // Double-tap protection
     private var lastToggleTime = 0L
@@ -99,8 +100,13 @@ class MainActivity : Activity() {
             if (now - lastToggleTime < DEBOUNCE_MS) return@setOnClickListener
             lastToggleTime = now
             it.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-            if (checkPermissions()) {
+            if (service?.isSessionActive() == true) {
                 toggle()
+            } else if (checkPermissions()) {
+                toggle()
+            } else {
+                getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
+                    .edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, true).apply()
             }
         }
 
@@ -133,6 +139,24 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         requestBatteryExemption()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        activityResumed = true
+        showCorrectScreen()
+        resumeRecordingIfPermitted()
+    }
+
+    override fun onPause() {
+        activityResumed = false
+        super.onPause()
+    }
+
+    private fun resumeRecordingIfPermitted() {
+        if (!activityResumed ||
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) return
         if (AuthManager.isAuthenticated()) {
             val shouldRecord = getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
                 .getBoolean(RecordingService.PREF_SHOULD_RECORD, true)
@@ -187,13 +211,10 @@ class MainActivity : Activity() {
     // ─── Sign Out ─────────────────────────────────────────────────────────
 
     private fun signOut() {
-        val svc = service
-        if (svc != null && svc.isCurrentlyRecording()) {
-            getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
-                .edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, false).apply()
-            val intent = Intent(this, RecordingService::class.java).apply { action = RecordingService.ACTION_STOP }
-            startService(intent)
-        }
+        getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
+            .edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, false).apply()
+        stopService(Intent(this, RecordingService::class.java))
+        doUnbind()
         AuthManager.clearAuth()
         Toast.makeText(this, "Signed out", Toast.LENGTH_SHORT).show()
         showCorrectScreen()
@@ -244,9 +265,7 @@ class MainActivity : Activity() {
                             authBtn.text = "OK"
                             delay(1500)
                             showCorrectScreen()
-                            val intent = Intent(this@MainActivity, RecordingService::class.java)
-                            startForegroundService(intent)
-                            doBind(intent)
+                            resumeRecordingIfPermitted()
                             return@pollLoop
                         }
                         is AuthManager.PollResult.Pending -> {
@@ -282,7 +301,7 @@ class MainActivity : Activity() {
     private fun toggle() {
         val prefs = getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
         val svc = service
-        if (svc == null || !svc.isCurrentlyRecording()) {
+        if (svc == null || !svc.isSessionActive()) {
             // Start recording — clear any pending stop confirmation
             confirmPending = false
             confirmResetJob?.cancel()
@@ -320,12 +339,18 @@ class MainActivity : Activity() {
         if (!AuthManager.isAuthenticated()) return
 
         val svc = service
-        if (svc != null && svc.isCurrentlyRecording()) {
+        if (svc != null && svc.isSessionActive()) {
             // Recording state — red button
             toggleBtn.setBackgroundResource(R.drawable.circle_button_recording)
             if (!confirmPending) {
-                statusText.text = "RECORDING"
-                statusText.setTextColor(0xFFCC3333.toInt())
+                statusText.text = when (svc.recordingState) {
+                    RecordingService.RecordingState.RECORDING -> "RECORDING"
+                    RecordingService.RecordingState.RECOVERING -> "RECOVERING MIC"
+                    RecordingService.RecordingState.STORAGE_FULL -> "STORAGE FULL"
+                    RecordingService.RecordingState.PERMISSION_REQUIRED -> "MIC PERMISSION"
+                    RecordingService.RecordingState.STOPPED -> "STARTING"
+                }
+                statusText.setTextColor(if (svc.isCurrentlyRecording()) 0xFFCC3333.toInt() else 0xFFFFAA33.toInt())
                 toggleBtn.text = "STOP"
             }
 
@@ -336,12 +361,16 @@ class MainActivity : Activity() {
             val chunks = svc.totalChunks
             val mb = String.format("%.1f", svc.getStorageUsed() / 1024.0 / 1024.0)
 
-            infoText.text = "${hrs}h ${m}m | ${chunks} chunks\n${mb} MB | Drive"
+            infoText.text = when (svc.recordingState) {
+                RecordingService.RecordingState.STORAGE_FULL -> "$mb MB pending\nWaiting for uploads"
+                RecordingService.RecordingState.RECOVERING -> "Microphone unavailable\nRetrying automatically"
+                else -> "${hrs}h ${m}m | ${chunks} chunks\n${mb} MB pending"
+            }
         } else {
             // Stopped state — default button
             toggleBtn.setBackgroundResource(R.drawable.circle_button)
             confirmPending = false
-            statusText.text = "STOPPED"
+            statusText.text = if (svc?.recordingState == RecordingService.RecordingState.PERMISSION_REQUIRED) "MIC PERMISSION" else "STOPPED"
             statusText.setTextColor(0xFF888888.toInt())
             toggleBtn.text = "START"
             infoText.text = "Tap to record\nLong press to sign out"
@@ -389,7 +418,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(code, perms, results)
         if (results.all { it == PackageManager.PERMISSION_GRANTED }) {
             if (AuthManager.isAuthenticated()) {
-                toggle()
+                resumeRecordingIfPermitted()
             }
         } else {
             val denied = perms.filterIndexed { i, _ -> results[i] != PackageManager.PERMISSION_GRANTED }

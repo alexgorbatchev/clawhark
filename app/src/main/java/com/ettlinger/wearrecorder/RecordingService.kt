@@ -1,5 +1,6 @@
 package com.ettlinger.wearrecorder
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -51,8 +53,8 @@ class RecordingService : Service() {
         const val UPLOAD_FALLBACK_WORK_NAME = "upload_fallback"
         const val STATUS_LOG_INTERVAL_MS = 300_000L // 5 min
         const val MIN_FREE_SPACE_BYTES = 50 * 1024 * 1024L // 50MB
-        const val MAX_LOCAL_STORAGE_BYTES = 500 * 1024 * 1024L // 500MB — FIFO eviction
-        const val MIC_RECOVERY_MAX_RETRIES = 5
+        const val MAX_LOCAL_STORAGE_BYTES = 500 * 1024 * 1024L // Preserve queued audio; pause at the limit.
+        const val RECOVERY_MAX_DELAY_MS = 60_000L
         const val STALE_TMP_THRESHOLD_MS = 20 * 60 * 1000L // 20min — older .tmp files are likely complete
 
         // Shared preference keys (used by MainActivity too)
@@ -67,6 +69,12 @@ class RecordingService : Service() {
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var recordJob: Job? = null
+    private var statusJob: Job? = null
+
+    enum class RecordingState { STOPPED, RECORDING, RECOVERING, STORAGE_FULL, PERMISSION_REQUIRED }
+
+    @Volatile var recordingState = RecordingState.STOPPED
+        private set
 
     // Stats
     @Volatile private var totalBytesEncoded = 0L
@@ -132,8 +140,26 @@ class RecordingService : Service() {
                     }
                     AppLog.i(TAG, "START_STICKY restart — resuming recording")
                 }
-                startForeground(NOTIFICATION_ID, createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    isRecording = false
+                    recordJob?.cancel()
+                    recordingState = RecordingState.PERMISSION_REQUIRED
+                    stopSelf()
+                    ResumeRecordingNotification.show(this, "Grant microphone permission to resume recording")
+                    return START_NOT_STICKY
+                }
+                try {
+                    startForeground(NOTIFICATION_ID, createNotification(),
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                } catch (error: SecurityException) {
+                    AppLog.e(TAG, "Foreground microphone access unavailable", error)
+                    isRecording = false
+                    recordJob?.cancel()
+                    recordingState = RecordingState.PERMISSION_REQUIRED
+                    stopSelf()
+                    ResumeRecordingNotification.show(this, "Open ClawHark to resume recording")
+                    return START_NOT_STICKY
+                }
                 startRecording()
             }
         }
@@ -145,9 +171,7 @@ class RecordingService : Service() {
         logStats()
         isRecording = false
         scope.cancel()
-        // Safety-net: release wake lock in case NonCancellable finally block hasn't run yet.
-        // Non-ref-counted lock + isHeld check makes double-release a safe no-op.
-        wakeLock?.let { if (it.isHeld) it.release() }
+        // The recording coroutine owns resource cleanup, including during cancellation.
         super.onDestroy()
     }
 
@@ -184,9 +208,16 @@ class RecordingService : Service() {
     private fun createNotification(): Notification {
         val intent = Intent(this, MainActivity::class.java)
         val pending = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val (title, message) = when (recordingState) {
+            RecordingState.RECORDING -> "Recording" to "Listening..."
+            RecordingState.RECOVERING -> "Recording interrupted" to "Waiting for the microphone; retrying automatically"
+            RecordingState.STORAGE_FULL -> "Recording paused" to "Storage full; preserving audio and waiting for uploads"
+            RecordingState.PERMISSION_REQUIRED -> "Microphone permission required" to "Open ClawHark to resume recording"
+            RecordingState.STOPPED -> "ClawHark" to "Starting recording..."
+        }
         return Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("Recording")
-            .setContentText("Listening...")
+            .setContentTitle(title)
+            .setContentText(message)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pending)
             .setOngoing(true)
@@ -194,9 +225,93 @@ class RecordingService : Service() {
     }
 
     private fun startRecording() {
-        if (isRecording) {
-            AppLog.w(TAG, "startRecording() called but already recording — ignoring")
+        val previous = recordJob
+        if (previous != null && !previous.isCompleted) {
+            if (!previous.isActive) {
+                scope.launch {
+                    previous.join()
+                    withContext(Dispatchers.Main) {
+                        if (recordingRequested()) startRecording()
+                    }
+                }
+            }
             return
+        }
+
+        ResumeRecordingNotification.cancel(this)
+        cleanupOrphanedTmpFiles()
+        scheduleUploads()
+        recordJob = scope.launch(start = CoroutineStart.LAZY) {
+            var failures = 0
+            try {
+                while (isActive && recordingRequested()) {
+                    if (!hasEnoughDiskSpace()) {
+                        updateRecordingState(RecordingState.STORAGE_FULL)
+                        delay(RECOVERY_MAX_DELAY_MS)
+                        continue
+                    }
+                    try {
+                        openMicrophone()
+                        acquireRecordingWakeLock()
+                        recordingStartTime = System.currentTimeMillis()
+                        updateRecordingState(RecordingState.RECORDING)
+                        recordLoop()
+                        failures = 0
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: SecurityException) {
+                        AppLog.e(TAG, "Microphone permission unavailable", error)
+                        updateRecordingState(RecordingState.PERMISSION_REQUIRED)
+                        withContext(Dispatchers.Main) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                            ResumeRecordingNotification.show(this@RecordingService, "Grant microphone permission to resume recording")
+                        }
+                        break
+                    } catch (error: Exception) {
+                        AppLog.e(TAG, "Recording interrupted; retrying", error)
+                        failures++
+                    } finally {
+                        releaseAudioCapture()
+                    }
+                    if (isActive && recordingRequested()) {
+                        if (!hasEnoughDiskSpace()) {
+                            updateRecordingState(RecordingState.STORAGE_FULL)
+                            delay(RECOVERY_MAX_DELAY_MS)
+                        } else {
+                            updateRecordingState(RecordingState.RECOVERING)
+                            delay(minOf(5000L * (1L shl minOf(failures, 4)), RECOVERY_MAX_DELAY_MS))
+                        }
+                    }
+                }
+            } finally {
+                isRecording = false
+                releaseAudioCapture()
+            }
+        }
+        recordJob?.start()
+
+        statusJob?.cancel()
+        statusJob = scope.launch {
+            while (isSessionActive()) {
+                delay(STATUS_LOG_INTERVAL_MS)
+                if (isSessionActive()) logPeriodicStatus()
+            }
+        }
+    }
+
+    private fun recordingRequested() = getSharedPreferences(PREF_FILE, MODE_PRIVATE)
+        .getBoolean(PREF_SHOULD_RECORD, true)
+
+    private fun updateRecordingState(state: RecordingState) {
+        recordingState = state
+        isRecording = state == RecordingState.RECORDING
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification())
+    }
+
+    private fun openMicrophone() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException("Microphone permission is required")
         }
 
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -206,93 +321,72 @@ class RecordingService : Service() {
 
         logAudioState()
 
+        val recorder = AudioRecord(
+            MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, internalBufSize
+        )
         try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                internalBufSize
-            )
-            AppLog.i(TAG, "AudioRecord created — state=${audioRecord?.state} (${if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) "INITIALIZED" else "ERROR"})")
-        } catch (e: SecurityException) {
-            AppLog.e(TAG, "FATAL: No mic permission!", e)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        } catch (e: Exception) {
-            AppLog.e(TAG, "FATAL: Failed to create AudioRecord", e)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
+            check(recorder.state == AudioRecord.STATE_INITIALIZED) { "Microphone could not be initialized" }
+            recorder.startRecording()
+            audioRecord = recorder
+            AppLog.i(TAG, "Microphone capture started")
+        } catch (error: Exception) {
+            recorder.release()
+            throw error
         }
+    }
 
-        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-            AppLog.e(TAG, "FATAL: AudioRecord not initialized — mic may be in use")
-            audioRecord?.release()
-            audioRecord = null
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
-
-        isRecording = true
-        recordingStartTime = System.currentTimeMillis()
-
+    private fun acquireRecordingWakeLock() {
+        if (wakeLock?.isHeld == true) return
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ClawHark::Recording").apply {
             setReferenceCounted(false) // Prevents stacking — single release() fully releases
         }
-        wakeLock?.acquire() // No timeout — foreground service prevents doze; released in finally block
+        wakeLock?.acquire()
         AppLog.i(TAG, "Wake lock acquired (non-ref-counted, no timeout)")
+    }
 
-        try {
-            audioRecord?.startRecording()
-            AppLog.i(TAG, "=== RECORDING STARTED === sampleRate=$SAMPLE_RATE chunkDuration=${CHUNK_DURATION_MS/1000}s vadThreshold=$VAD_THRESHOLD codec=AAC@${AAC_BIT_RATE/1000}kbps readBuf=${READ_BUFFER_SAMPLES}samples")
-        } catch (e: Exception) {
-            AppLog.e(TAG, "FATAL: AudioRecord.startRecording() failed", e)
-            isRecording = false
-            audioRecord?.release()
-            audioRecord = null
-            wakeLock?.let { if (it.isHeld) it.release() }
-            wakeLock = null
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
+    private fun releaseAudioCapture() {
+        isRecording = false
+        val recorder = audioRecord
+        audioRecord = null
+        try { recorder?.stop() } catch (_: Exception) {}
+        try { recorder?.release() } catch (_: Exception) {}
+        val lock = wakeLock
+        wakeLock = null
+        lock?.let { if (it.isHeld) it.release() }
+    }
 
-        // Clean up any orphaned .tmp files from previous crashes
-        cleanupOrphanedTmpFiles()
-
-        // Schedule periodic uploads via WorkManager
-        scheduleUploads()
-
-        // Periodic status logger
-        scope.launch {
-            while (isRecording) {
-                delay(STATUS_LOG_INTERVAL_MS)
-                if (isRecording) logPeriodicStatus()
-            }
-        }
-
-        // Record loop — owns AudioRecord and wake lock cleanup via finally block
-        recordJob = scope.launch {
+    private suspend fun recoverMicrophone(recorder: AudioRecord) {
+        updateRecordingState(RecordingState.RECOVERING)
+        logAudioState()
+        try { recorder.stop() } catch (_: Exception) {}
+        try { recorder.release() } catch (_: Exception) {}
+        audioRecord = null
+        var attempt = 0
+        while (currentCoroutineContext().isActive && recordingRequested()) {
+            val backoffMs = minOf(5000L * (1L shl minOf(attempt, 4)), RECOVERY_MAX_DELAY_MS)
+            AppLog.i(TAG, "Mic recovery attempt ${attempt + 1} in ${backoffMs / 1000}s")
+            delay(backoffMs)
+            if (!recordingRequested()) return
             try {
-                recordLoop()
-            } catch (e: CancellationException) {
-                AppLog.d(TAG, "recordLoop cancelled")
-            } catch (e: Exception) {
-                AppLog.e(TAG, "FATAL: recordLoop crashed!", e)
+                openMicrophone()
+                updateRecordingState(RecordingState.RECORDING)
+                return
+            } catch (error: SecurityException) {
+                throw error
+            } catch (error: Exception) {
+                AppLog.w(TAG, "Microphone still unavailable; retrying")
+                attempt++
             }
         }
     }
 
     private fun stopRecording() {
-        if (!isRecording) {
-            AppLog.d(TAG, "stopRecording() called but not recording")
-            return
-        }
         AppLog.i(TAG, "=== STOPPING RECORDING ===")
         isRecording = false
-        // recordLoop detects isRecording=false, finalizes encoder, and cleans up AudioRecord + wake lock
+        recordingState = RecordingState.STOPPED
+        recordJob?.cancel()
         // Cancel periodic uploads (no longer producing files) and trigger one final upload
         val wm = WorkManager.getInstance(this)
         wm.cancelUniqueWork(UploadWorker.WORK_NAME)
@@ -301,6 +395,7 @@ class RecordingService : Service() {
     }
 
     fun isCurrentlyRecording() = isRecording
+    fun isSessionActive() = recordJob?.isActive == true
 
     // ─── Streaming Encoder ───────────────────────────────────────────────
 
@@ -493,7 +588,6 @@ class RecordingService : Service() {
             totalChunks++
 
             wakeLock?.acquire()
-            enforceStorageLimit()
 
             AppLog.i(TAG, "New chunk #$chunkNumber")
         }
@@ -501,7 +595,12 @@ class RecordingService : Service() {
         try {
             startNewChunk()
 
-            while (isRecording) {
+            while (currentCoroutineContext().isActive && recordingRequested()) {
+                currentCoroutineContext().ensureActive()
+                if (!hasEnoughDiskSpace()) {
+                    updateRecordingState(RecordingState.STORAGE_FULL)
+                    break
+                }
                 val ar = audioRecord ?: break
                 val read = ar.read(buffer, 0, buffer.size)
 
@@ -514,48 +613,7 @@ class RecordingService : Service() {
                         else -> "ERROR($read)"
                     }
                     AppLog.e(TAG, "AudioRecord.read() returned $errorName — totalReadErrors=$totalReadErrors")
-                    if (read == AudioRecord.ERROR_DEAD_OBJECT) {
-                        AppLog.e(TAG, "DEAD OBJECT — mic taken by another app. Attempting recovery...")
-                        logAudioState()
-                        try { ar.stop() } catch (_: Exception) {}
-                        try { ar.release() } catch (_: Exception) {}
-                        audioRecord = null
-
-                        // Retry with exponential backoff: 5s, 10s, 20s, 40s, 60s
-                        var recovered = false
-                        for (attempt in 1..MIC_RECOVERY_MAX_RETRIES) {
-                            val backoffMs = minOf(5000L * (1L shl (attempt - 1)), 60_000L)
-                            AppLog.i(TAG, "Mic recovery attempt $attempt/$MIC_RECOVERY_MAX_RETRIES in ${backoffMs/1000}s...")
-                            delay(backoffMs)
-                            if (!isRecording) break
-                            try {
-                                val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-                                val readBuf = READ_BUFFER_SAMPLES * 2
-                                val intBuf = maxOf(minBuf, readBuf) * 2
-                                val newAr = AudioRecord(
-                                    MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
-                                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, intBuf
-                                )
-                                if (newAr.state == AudioRecord.STATE_INITIALIZED) {
-                                    newAr.startRecording()
-                                    audioRecord = newAr
-                                    AppLog.i(TAG, "AudioRecord recovered on attempt $attempt")
-                                    recovered = true
-                                    break
-                                } else {
-                                    AppLog.w(TAG, "Mic recovery attempt $attempt failed — mic still in use")
-                                    newAr.release()
-                                }
-                            } catch (e: Exception) {
-                                AppLog.e(TAG, "Mic recovery attempt $attempt exception", e)
-                            }
-                        }
-                        if (!recovered) {
-                            AppLog.e(TAG, "All $MIC_RECOVERY_MAX_RETRIES mic recovery attempts failed — recording will stop")
-                        }
-                        continue
-                    }
-                    delay(100)
+                    recoverMicrophone(ar)
                     continue
                 }
 
@@ -641,8 +699,11 @@ class RecordingService : Service() {
                 }
             }
         } finally {
-            // All cleanup in finally with NonCancellable — runs even if scope is cancelled.
-            // This is the ONLY cleanup path (no safety-net in onDestroy), eliminating double-release.
+            // Finalize the current chunk even if capture failed or the job was cancelled.
+            isRecording = false
+            if (recordingState == RecordingState.RECORDING) {
+                updateRecordingState(if (recordingRequested()) RecordingState.RECOVERING else RecordingState.STOPPED)
+            }
             withContext(NonCancellable) {
                 AppLog.i(TAG, "recordLoop: finalizing and cleaning up")
 
@@ -663,14 +724,7 @@ class RecordingService : Service() {
                     AppLog.d(TAG, "Final chunk had no voice — no encoder to finalize")
                 }
 
-                // Release AudioRecord
-                try { audioRecord?.stop() } catch (_: Exception) {}
-                try { audioRecord?.release() } catch (_: Exception) {}
-                audioRecord = null
-
-                // Release wake lock
-                wakeLock?.let { if (it.isHeld) it.release() }
-                wakeLock = null
+                releaseAudioCapture()
 
                 AppLog.d(TAG, "recordLoop: cleanup complete")
             }
@@ -815,23 +869,11 @@ class RecordingService : Service() {
 
     // ─── Storage ─────────────────────────────────────────────────────────
 
-    private fun enforceStorageLimit() {
-        val recordings = getRecordings()
-        var totalSize = recordings.sumOf { it.length() }
-        if (totalSize <= MAX_LOCAL_STORAGE_BYTES) return
-
-        val sorted = recordings.sortedBy { it.lastModified() }
-        val target = (MAX_LOCAL_STORAGE_BYTES * 0.8).toLong() // Shrink to 80%
-        for (file in sorted) {
-            if (totalSize <= target) break
-            val size = file.length()
-            AppLog.w(TAG, "Storage limit: deleting oldest recording ${file.name} (${size/1024}KB)")
-            file.delete()
-            totalSize -= size
-        }
-    }
-
     private fun hasEnoughDiskSpace(): Boolean {
+        if (getStorageUsed() >= MAX_LOCAL_STORAGE_BYTES) {
+            AppLog.w(TAG, "Pending audio reached storage limit — preserving recordings and pausing capture")
+            return false
+        }
         val freeSpace = getChunkDir().usableSpace
         if (freeSpace < MIN_FREE_SPACE_BYTES) {
             AppLog.w(TAG, "Low disk space: ${freeSpace / 1024 / 1024}MB free (min ${MIN_FREE_SPACE_BYTES / 1024 / 1024}MB) — skipping encoding")
@@ -850,5 +892,7 @@ class RecordingService : Service() {
         return getChunkDir().listFiles()?.filter { it.extension == "m4a" }?.sortedBy { it.name } ?: emptyList()
     }
 
-    fun getStorageUsed(): Long = getRecordings().sumOf { it.length() }
+    fun getStorageUsed(): Long = getChunkDir().listFiles()?.filter {
+        it.name.endsWith(".m4a") || it.name.endsWith(".m4a.tmp") || it.name.endsWith(".m4a.uploading")
+    }?.sumOf { it.length() } ?: 0L
 }

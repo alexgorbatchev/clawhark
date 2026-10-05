@@ -11,3 +11,4 @@ logs/
 keystore/
 app/src/main/assets/oauth_config.json
 keystore.properties
+client_secret_*.json

@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Auto-restarts recording after watch reboot if the user had recording enabled.
+ * Prompts the user to resume after reboot without starting a background microphone.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -21,9 +21,8 @@ class BootReceiver : BroadcastReceiver() {
         ).getBoolean(RecordingService.PREF_SHOULD_RECORD, true)
 
         if (shouldRecord) {
-            AppLog.i("Boot", "Reboot detected — restarting recording")
-            val serviceIntent = Intent(context, RecordingService::class.java)
-            context.startForegroundService(serviceIntent)
+            AppLog.i("Boot", "Reboot detected — user interaction required to resume recording")
+            ResumeRecordingNotification.show(context)
         }
     }
 }
