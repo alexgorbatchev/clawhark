@@ -22,7 +22,7 @@ class BootReceiver : BroadcastReceiver() {
 
         if (shouldRecord) {
             AppLog.i("Boot", "Reboot detected — restarting recording")
-            // Alex: Automatic microphone capture after reboot needs testing on our Pixel Watch 3
+            // alexgorbatchev: Automatic microphone capture after reboot needs testing on our Pixel Watch 3
             // running Wear OS 7; Android documents restrictions and exceptions for this behavior:
             // https://developer.android.com/develop/background-work/services/fgs/service-types#microphone
             val serviceIntent = Intent(context, RecordingService::class.java)
