@@ -20,6 +20,8 @@ import android.os.BatteryManager
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.storage.StorageManager
+import androidx.core.content.edit
 import kotlinx.coroutines.*
 import java.io.File
 import java.text.SimpleDateFormat
@@ -50,6 +52,7 @@ class RecordingService : Service() {
     }
 
     private val binder = LocalBinder()
+    private val recordingStorage by lazy { RecordingStorage(getSystemService(StorageManager::class.java)) }
     @Volatile private var audioRecord: AudioRecord? = null
     @Volatile private var isRecording = false
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
@@ -107,7 +110,7 @@ class RecordingService : Service() {
             ACTION_STOP -> {
                 AppLog.i(TAG, "STOP requested — shutting down")
                 getSharedPreferences(PREF_FILE, MODE_PRIVATE)
-                    .edit().putBoolean(PREF_SHOULD_RECORD, false).apply()
+                    .edit { putBoolean(PREF_SHOULD_RECORD, false) }
                 logStats()
                 stopRecording()
                 return START_NOT_STICKY
@@ -580,7 +583,7 @@ class RecordingService : Service() {
     private fun logPeriodicStatus() {
         val uptimeMin = (System.currentTimeMillis() - recordingStartTime) / 60000
         val localFiles = getRecordings().size
-        val localMB = String.format("%.1f", getStorageUsed() / 1024.0 / 1024.0)
+        val localMB = String.format(Locale.ROOT, "%.1f", getStorageUsed() / 1024.0 / 1024.0)
         AppLog.i(TAG, "=== STATUS (${uptimeMin}m uptime) ===")
         AppLog.i(TAG, "  Recording: $isRecording | AudioRecord state: ${audioRecord?.state}")
         AppLog.i(TAG, "  Chunks: $totalChunks total ($chunksWithVoice voice, $chunksWithoutVoice silent)")
@@ -588,7 +591,7 @@ class RecordingService : Service() {
         AppLog.i(TAG, "  Local files: $localFiles ($localMB MB) — uploads every ${UploadScheduler.UPLOAD_INTERVAL_MINUTES}min")
         AppLog.i(TAG, "  Read errors: $totalReadErrors")
         AppLog.i(TAG, "  WakeLock held: ${wakeLock?.isHeld}")
-        AppLog.i(TAG, "  Free space: ${getChunkDir().usableSpace / 1024 / 1024}MB")
+        AppLog.i(TAG, "  Free space: ${recordingStorage.freeBytes(getChunkDir()) / 1024 / 1024}MB")
         logBatteryStatus(); logAudioState()
     }
 
@@ -667,8 +670,8 @@ class RecordingService : Service() {
             AppLog.w(TAG, "Pending audio reached storage limit — preserving recordings and pausing capture")
             return false
         }
-        val freeSpace = getChunkDir().usableSpace
-        if (freeSpace < MIN_FREE_SPACE_BYTES) {
+        if (!recordingStorage.hasHeadroom(getChunkDir(), MIN_FREE_SPACE_BYTES)) {
+            val freeSpace = recordingStorage.freeBytes(getChunkDir())
             AppLog.w(TAG, "Low disk space: ${freeSpace / 1024 / 1024}MB free (min ${MIN_FREE_SPACE_BYTES / 1024 / 1024}MB) — skipping encoding")
             return false
         }

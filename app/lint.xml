@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!-- Google 2.2.0 contains SslUtils.trustAllSSLContext for explicit test-only opt-in.
+         The app uses NetHttpTransport's platform TLS defaults, never that helper.
+         DriveUploaderTest.untrustedHttpsCertificateCannotReceiveRecordings verifies rejection.
+         Keep this exception limited to this library version; review it when upgrading.
+         https://github.com/googleapis/google-http-java-client/blob/v2.2.0/google-http-client/src/main/java/com/google/api/client/util/SslUtils.java -->
+    <issue id="TrustAllX509TrustManager">
+        <ignore path="**/google-http-client-2.2.0.jar" />
+    </issue>
+</lint>

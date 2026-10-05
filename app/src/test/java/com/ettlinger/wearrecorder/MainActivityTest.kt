@@ -52,6 +52,19 @@ class MainActivityTest {
     }
 
     @Test
+    fun startPersistsRecordingPreferenceAndStartsWatchService() {
+        val app = RuntimeEnvironment.getApplication()
+        shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
+        val prefs = app.getSharedPreferences(RecordingService.PREF_FILE, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, false).commit()
+        val controller = Robolectric.buildActivity(MainActivity::class.java).create()
+        MainActivity::class.java.getDeclaredMethod("toggle").apply { isAccessible = true }.invoke(controller.get())
+        org.junit.Assert.assertTrue(prefs.getBoolean(RecordingService.PREF_SHOULD_RECORD, false))
+        assertEquals(RecordingService::class.java.name, shadowOf(app).nextStartedService.component?.className)
+        controller.destroy()
+    }
+
+    @Test
     fun permissionCallbackPreservesExplicitStop() {
         val app = RuntimeEnvironment.getApplication()
         shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)

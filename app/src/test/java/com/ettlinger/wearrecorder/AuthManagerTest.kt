@@ -95,6 +95,41 @@ class AuthManagerTest {
         assertEquals(token, decodeForm(request.body.readUtf8())["token"])
     }
 
+    @Test fun sessionIsUnavailableWhenPersistenceFails() {
+        setField("prefs", FailingCommitPreferences(prefs))
+        assertNull(AuthManager.authorizationSession())
+    }
+
+    @Test fun failedRefreshCommitCannotReturnAnAccessToken() = runTest {
+        setField("prefs", FailingCommitPreferences(prefs))
+        server.enqueue(200, "{\"access_token\":\"access\",\"expires_in\":3600}")
+        assertNull(AuthManager.getAccessToken())
+    }
+
+    @Test fun failedAuthorizationCommitCannotReportSuccess() = runTest {
+        setField("prefs", FailingCommitPreferences(prefs))
+        server.enqueue(200, "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_in\":3600}")
+        assertTrue(AuthManager.pollForAuthorization("code") is AuthManager.PollResult.Error)
+    }
+
+    /** Injects the documented false commit result without publishing staged changes. */
+    private class FailingCommitPreferences(private val storage: SharedPreferences) : SharedPreferences by storage {
+        override fun edit(): SharedPreferences.Editor {
+            val editor = storage.edit()
+            return object : SharedPreferences.Editor by editor {
+                override fun putString(key: String?, value: String?): SharedPreferences.Editor {
+                    editor.putString(key, value)
+                    return this
+                }
+                override fun putLong(key: String?, value: Long): SharedPreferences.Editor {
+                    editor.putLong(key, value)
+                    return this
+                }
+                override fun commit(): Boolean = false
+            }
+        }
+    }
+
     private fun setField(name: String, value: Any?) {
         AuthManager::class.java.getDeclaredField(name).apply { isAccessible = true }.set(AuthManager, value)
     }

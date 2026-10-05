@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-05 02:59
-last_modified: 2026-10-05 02:59
+last_modified: 2026-10-05 03:37
 status: current
 ---
 
@@ -13,7 +13,7 @@ Maintain this fork's Wear OS recording app and Google Drive uploads. Preserve th
 Run from the repository root after configuring the prerequisites below:
 
 ```bash
-./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease --no-daemon
+./gradlew testDebugUnitTest lintDebug lintRelease assembleDebug assembleRelease createDebugUnitTestCoverageReport --no-daemon
 ```
 
 For a focused authentication test run:
@@ -22,19 +22,19 @@ For a focused authentication test run:
 ./gradlew testDebugUnitTest --tests com.ettlinger.wearrecorder.AuthManagerTest --no-daemon
 ```
 
-The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Without signing properties, the minimized release is `app/build/outputs/apk/release/app-release-unsigned.apk`; it must be signed before installation. Unit-test and lint reports are under `app/build/reports/`.
+The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Without signing properties, the minimized release is `app/build/outputs/apk/release/app-release-unsigned.apk`; it must be signed before installation. Unit-test and lint reports are under `app/build/reports/`; unit-test coverage is under `app/build/reports/coverage/test/debug/`.
 
 ## Build and account setup
 
-- Use JDK 17 and Android SDK platform 34. Set `JAVA_HOME` and `ANDROID_HOME`, or configure the SDK location with `sdk.dir` in ignored `local.properties`. Add the SDK's `platform-tools` directory to `PATH` for ADB.
-- Use the checked-in Gradle 8.5 wrapper (`gradlew`, or `gradlew.bat` on Windows). Regenerate wrapper files with Gradle's `wrapper` task; verify the JAR against [Gradle's published checksums](https://gradle.org/release-checksums/) and retain `distributionSha256Sum`. Keep the launcher line endings specified by `.gitattributes`.
+- Use JDK 17, Android SDK platform `android-37.0`, and Build Tools 36.0.0. Set `JAVA_HOME` and `ANDROID_HOME`, or configure the SDK location with `sdk.dir` in ignored `local.properties`. Add the SDK's `platform-tools` directory to `PATH` for ADB. Compilation uses SDK 37; the app still targets SDK 34 and supports API 30 onward.
+- Use the checked-in Gradle 9.8.0 wrapper (`gradlew`, or `gradlew.bat` on Windows) and AGP 9.4.1's built-in Kotlin support. Regenerate wrapper files with Gradle's `wrapper` task; verify the JAR against [Gradle's published checksums](https://gradle.org/release-checksums/) and retain `distributionSha256Sum`. Keep the launcher line endings specified by `.gitattributes`.
 - Enable the [Google Drive API](https://console.cloud.google.com/apis/library/drive.googleapis.com) in your Google Cloud project. Configure an OAuth client of type **TVs and Limited Input devices** and the `https://www.googleapis.com/auth/drive.file` scope, following [Google's device authorization documentation](https://developers.google.com/identity/protocols/oauth2/limited-input-device).
 - Copy `app/src/main/assets/oauth_config.json.example` to ignored `app/src/main/assets/oauth_config.json` if it does not exist, and fill in your client ID and client secret. Preserve existing credentials. Missing or invalid configuration prevents sign-in; credentials bundled in an APK are extractable.
 - For a signed release, copy `keystore.properties.example` to ignored root `keystore.properties` and supply your own key and passwords. `storeFile` resolves relative to `app/`: use `../keystore/your-release.jks` for a keystore in the root `keystore/` directory. Do not commit keystores or signing properties.
 
 ## Tests and verification
 
-- Behavior-changing code edits must update a corresponding test file and achieve at least 90% code coverage; `scripts/` is excluded from this coverage rule. The current build has no coverage-report task or checked-in CI workflow: measure coverage before claiming the threshold is met.
+- Behavior-changing code edits must update a corresponding test file and achieve at least 90% code coverage; `scripts/` is excluded from this coverage rule. Run `createDebugUnitTestCoverageReport` to measure coverage before claiming the threshold is met. There is no checked-in CI workflow.
 - Use red/green development. Demonstrate a behavioral failure before the fix; after the fix passes, temporarily disable the fix, confirm the regression fails, then restore it. Do not write tests that only repeat constants or configuration definitions.
 - Follow [AuthManagerTest.kt](app/src/test/java/com/ettlinger/wearrecorder/AuthManagerTest.kt) for local HTTP failure and race tests, and [RecordingServiceTest.kt](app/src/test/java/com/ettlinger/wearrecorder/RecordingServiceTest.kt) for lifecycle and cleanup ordering. Keep HTTP tests isolated from real Google accounts.
 - Run checks appropriate to the change and report their actual outputs and remaining warnings. Documentation-only changes need link, command, and diff checks; they do not need another APK build.
@@ -48,12 +48,14 @@ The debug APK is `app/build/outputs/apk/debug/app-debug.apk`. Without signing pr
 - Use the Drive SDK's resumable uploader and durable, account-bound file IDs. Delete audio only after matching remote ID, original filename, size, and checksum; preserve Google model reflection rules in `app/proguard-rules.pro`.
 - Preserve explicit stop and sign-out preferences. Automatic restart after boot remains an attempt: handle Android rejection with the resume notification, without claiming hardware capture succeeded.
 - Use native Android permission, service, audio, storage, and UI primitives. Check maintained dependencies and existing implementations before writing custom functionality; do not introduce compatibility layers unless requested.
+- `RecordingStorage` uses Android's allocator to reclaim cached data when physical free space is low. Keep allocation attempts at least one minute apart; queued audio is never cache. Authentication commits retain their Boolean success result because the KTX edit helper discards it.
 
 ## Working boundaries
 
 ### Always
 
 - Identify and read all applicable skills before writing or modifying code. Inspect current files and execution evidence first; verify external API and platform behavior against official documentation.
+- Fix lint findings at their source. Document any precise exception for a verified false positive, keep other checks active, and verify the affected behavior; see the Google HTTP 2.2.0 exception in `app/lint.xml` and its TLS rejection test.
 - Record new user instructions in the appropriate `AGENTS.md`; clarify conflicting existing instructions before changing them. Existing user authorization remains valid; do not reconfirm routine authorized work.
 - Work in `.workspaces/` worktrees created from `main` by default, and keep temporary files in the project `.tmp/`. Use `rg` or codegraph for discovery. Use Bun and TypeScript for temporary scripts, after reading their applicable skills.
 - Inspect Git status and the index before mutations. Pause and resync on unowned staged files, locks, or concurrent state changes; if unowned staged files remain for over 60 seconds, halt and report the exact paths. Never stage, reset, or modify another agent's work.

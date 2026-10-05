@@ -1,13 +1,14 @@
 import java.util.Properties
+import org.gradle.testing.jacoco.plugins.JacocoTaskExtension
 
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("jacoco")
 }
 
 android {
     namespace = "com.ettlinger.wearrecorder"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "ai.etti.clawhark"
@@ -31,8 +32,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            enableUnitTestCoverage = true
+        }
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release").takeIf { it.storeFile != null }
         }
@@ -43,10 +48,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
@@ -54,6 +55,14 @@ android {
     packaging {
         resources.excludes += "META-INF/INDEX.LIST" // JVM JAR index; unused by Android.
         resources.merges += "META-INF/DEPENDENCIES"
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    extensions.configure<JacocoTaskExtension> {
+        // Robolectric loads app classes without a CodeSource location.
+        isIncludeNoLocationClasses = true
+        includes = listOf("com.ettlinger.wearrecorder.*")
     }
 }
 
@@ -67,13 +76,14 @@ dependencies {
         exclude(group = "org.apache.httpcomponents")
     }
     implementation("androidx.wear:wear:1.4.0")
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
+    implementation("androidx.core:core:1.19.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("androidx.work:work-runtime:2.12.0")
     implementation("androidx.security:security-crypto:1.1.0")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.robolectric:robolectric:4.11.1")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
-    testImplementation("androidx.work:work-testing:2.9.1")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("androidx.work:work-testing:2.12.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")
+    testImplementation("com.squareup.okhttp3:okhttp-tls:5.5.0")
 }

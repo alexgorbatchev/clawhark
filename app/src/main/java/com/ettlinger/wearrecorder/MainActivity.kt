@@ -20,6 +20,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
+import androidx.core.content.edit
+import androidx.core.view.isVisible
+import java.util.Locale
 
 import kotlinx.coroutines.*
 
@@ -107,7 +110,7 @@ class MainActivity : Activity() {
                 toggle()
             } else {
                 getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
-                    .edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, true).apply()
+                    .edit { putBoolean(RecordingService.PREF_SHOULD_RECORD, true) }
             }
         }
 
@@ -227,7 +230,7 @@ class MainActivity : Activity() {
     private fun signOut() {
         authPollingJob?.cancel()
         getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
-            .edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, false).apply()
+            .edit { putBoolean(RecordingService.PREF_SHOULD_RECORD, false) }
         stopService(Intent(this, RecordingService::class.java))
         doUnbind()
         val token = AuthManager.disconnect()
@@ -281,7 +284,7 @@ class MainActivity : Activity() {
                 when (result) {
                     is AuthManager.PollResult.Success -> {
                         getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
-                            .edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, true).apply()
+                            .edit { putBoolean(RecordingService.PREF_SHOULD_RECORD, true) }
                         authTitle.text = getString(R.string.connected)
                         authStatus.text = ""
                         authCode.visibility = View.GONE
@@ -327,7 +330,7 @@ class MainActivity : Activity() {
             // Start recording — clear any pending stop confirmation
             confirmPending = false
             confirmResetJob?.cancel()
-            prefs.edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, true).apply()
+            prefs.edit { putBoolean(RecordingService.PREF_SHOULD_RECORD, true) }
             val intent = Intent(this, RecordingService::class.java)
             startForegroundService(intent)
             doBind(intent)
@@ -349,7 +352,7 @@ class MainActivity : Activity() {
             // Second tap — actually stop
             confirmPending = false
             confirmResetJob?.cancel()
-            prefs.edit().putBoolean(RecordingService.PREF_SHOULD_RECORD, false).apply()
+            prefs.edit { putBoolean(RecordingService.PREF_SHOULD_RECORD, false) }
             val intent = Intent(this, RecordingService::class.java).apply {
                 action = RecordingService.ACTION_STOP
             }
@@ -361,7 +364,7 @@ class MainActivity : Activity() {
     private fun updateUI() {
         val svc = service
         if (!AuthManager.isAuthenticated() && svc?.isSessionActive() != true) {
-            if (recordGroup.visibility == View.VISIBLE) showCorrectScreen()
+            if (recordGroup.isVisible) showCorrectScreen()
             return
         }
         recordGroup.visibility = View.VISIBLE
@@ -386,7 +389,7 @@ class MainActivity : Activity() {
             val hrs = mins / 60
             val m = mins % 60
             val chunks = svc.totalChunks
-            val mb = String.format("%.1f", storageBytes / 1024.0 / 1024.0)
+            val mb = String.format(Locale.getDefault(), "%.1f", storageBytes / 1024.0 / 1024.0)
 
             infoText.text = when (svc.recordingState) {
                 RecordingService.RecordingState.STORAGE_FULL -> getString(R.string.pending_storage, mb)
@@ -416,7 +419,7 @@ class MainActivity : Activity() {
         // Only prompt once — don't nag on every app open
         val prefs = getSharedPreferences(RecordingService.PREF_FILE, MODE_PRIVATE)
         if (prefs.getBoolean("battery_exemption_asked", false)) return
-        prefs.edit().putBoolean("battery_exemption_asked", true).apply()
+        prefs.edit { putBoolean("battery_exemption_asked", true) }
 
         val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
         try {

@@ -2,6 +2,8 @@ package com.ettlinger.wearrecorder
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.annotation.SuppressLint
+import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.google.api.client.http.GenericUrl
@@ -58,6 +60,8 @@ object AuthManager {
 
     @Synchronized fun isAuthenticated(): Boolean = prefs?.getString("refresh_token", null) != null
 
+    // KTX edit discards commit()'s result; upload IDs require confirmed durable storage.
+    @SuppressLint("UseKtx")
     @Synchronized fun authorizationSession(): String? {
         val storage = prefs ?: return null
         if (!isAuthenticated()) return null
@@ -68,7 +72,7 @@ object AuthManager {
 
     @Synchronized fun clearAuth() {
         generation++
-        prefs?.edit()?.clear()?.apply()
+        prefs?.edit { clear() }
         AppLog.i(TAG, "Local account disconnected")
     }
 
@@ -79,7 +83,7 @@ object AuthManager {
     }
 
     @Synchronized fun invalidateAccessToken() {
-        prefs?.edit()?.remove("access_token")?.putLong("token_expiry", 0)?.apply()
+        prefs?.edit { remove("access_token"); putLong("token_expiry", 0) }
     }
 
     data class DeviceCodeResponse(val deviceCode: String, val userCode: String,
@@ -132,6 +136,8 @@ object AuthManager {
         }
     }
 
+    // Report success only when commit() succeeds; the KTX edit API returns Unit.
+    @SuppressLint("UseKtx")
     suspend fun pollForAuthorization(deviceCode: String): PollResult {
         val epoch = synchronized(this) { generation }
         return try {
@@ -162,6 +168,8 @@ object AuthManager {
         }
     }
 
+    // A failed token commit must not be reported as a successful refresh.
+    @SuppressLint("UseKtx")
     suspend fun getAccessToken(): String? = tokenMutex.withLock {
         val snapshot = synchronized(this) {
             val storage = prefs ?: return@withLock null

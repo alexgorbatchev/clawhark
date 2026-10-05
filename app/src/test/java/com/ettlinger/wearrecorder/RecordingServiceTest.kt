@@ -6,6 +6,7 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.storage.StorageManager
 import androidx.work.Configuration
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
@@ -26,8 +27,13 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowAudioRecord
+import org.robolectric.shadows.ShadowStatFs
+import org.robolectric.annotation.Implementation
+import org.robolectric.annotation.Implements
 import java.io.File
 import java.io.RandomAccessFile
+import java.io.IOException
+import java.util.UUID
 import java.lang.reflect.InvocationTargetException
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
@@ -43,6 +49,7 @@ class RecordingServiceTest {
     fun setUp() {
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
         service = Robolectric.buildService(RecordingService::class.java).create().get()
+        ShadowStatFs.registerStats(service.getChunkDir().absolutePath, 1_000_000, 500_000, 500_000)
         setRecordingRequested(true)
         setField("isRecording", true)
     }
@@ -123,6 +130,72 @@ class RecordingServiceTest {
         val temporary = File(queued.parent, queued.name + ".tmp")
         assertTrue(queued.renameTo(temporary))
         assertEquals(RecordingService.MAX_LOCAL_STORAGE_BYTES + 1, service.getStorageUsed())
+    }
+
+    @Test
+    @Config(shadows = [StorageAllocator::class])
+    fun cacheReclamationMakesRoomForRecording() {
+        ShadowStatFs.registerStats(service.getChunkDir().absolutePath, 100_000, 0, 0)
+        StorageAllocator.allocatable = RecordingService.MIN_FREE_SPACE_BYTES
+        StorageAllocator.failAllocation = false
+        StorageAllocator.allocations = 0
+        assertTrue(hasDiskSpace())
+        assertEquals(1, StorageAllocator.allocations)
+    }
+
+    @Test
+    @Config(shadows = [StorageAllocator::class])
+    fun insufficientAllocatableSpacePausesCapture() {
+        ShadowStatFs.registerStats(service.getChunkDir().absolutePath, 100_000, 0, 0)
+        StorageAllocator.allocatable = RecordingService.MIN_FREE_SPACE_BYTES - 1
+        StorageAllocator.allocations = 0
+        assertFalse(hasDiskSpace())
+        assertEquals(0, StorageAllocator.allocations)
+    }
+
+    @Test
+    @Config(shadows = [StorageAllocator::class])
+    fun insufficientSpaceDoesNotRepeatAllocatorQueryWithinOneMinute() {
+        ShadowStatFs.registerStats(service.getChunkDir().absolutePath, 100_000, 0, 0)
+        StorageAllocator.allocatable = RecordingService.MIN_FREE_SPACE_BYTES - 1
+        StorageAllocator.queries = 0
+        assertFalse(hasDiskSpace())
+        assertFalse(hasDiskSpace())
+        assertEquals(1, StorageAllocator.queries)
+    }
+
+    @Test
+    @Config(shadows = [StorageAllocator::class])
+    fun failedAllocationPausesAndIsNotRepeatedWithinOneMinute() {
+        ShadowStatFs.registerStats(service.getChunkDir().absolutePath, 100_000, 0, 0)
+        StorageAllocator.allocatable = RecordingService.MIN_FREE_SPACE_BYTES
+        StorageAllocator.failAllocation = true
+        StorageAllocator.allocations = 0
+        assertFalse(hasDiskSpace())
+        assertFalse(hasDiskSpace())
+        assertEquals(1, StorageAllocator.allocations)
+    }
+
+    private fun hasDiskSpace() = RecordingService::class.java.getDeclaredMethod("hasEnoughDiskSpace")
+        .apply { isAccessible = true }.invoke(service) as Boolean
+
+    @Implements(StorageManager::class)
+    class StorageAllocator {
+        companion object {
+            var allocatable = 0L
+            var failAllocation = false
+            var allocations = 0
+            var queries = 0
+        }
+        @Implementation fun getUuidForPath(path: File): UUID = StorageManager.UUID_DEFAULT
+        @Implementation fun getAllocatableBytes(uuid: UUID): Long {
+            queries++
+            return allocatable
+        }
+        @Implementation fun allocateBytes(uuid: UUID, bytes: Long) {
+            allocations++
+            if (failAllocation) throw IOException("Storage allocation failed")
+        }
     }
 
     @Test

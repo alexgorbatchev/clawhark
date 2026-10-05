@@ -17,6 +17,10 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.annotation.RealObject
 import org.robolectric.shadow.api.Shadow
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.tls.HandshakeCertificates
+import okhttp3.tls.HeldCertificate
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -63,6 +67,27 @@ class DriveUploaderTest {
         assertFalse(DriveUploader(server.baseUrl).uploadFile(file))
         assertEquals(1, server.requestCount)
         assertTrue(file.exists())
+    }
+
+    @Test fun untrustedHttpsCertificateCannotReceiveRecordings() = runTest {
+        val certificate = HeldCertificate.Builder().addSubjectAlternativeName("localhost").build()
+        val tls = HandshakeCertificates.Builder().heldCertificate(certificate).build()
+        val https = MockWebServer().apply {
+            useHttps(tls.sslSocketFactory(), false)
+            start()
+        }
+        try {
+            val file = File(directory, "chunk.m4a").apply { writeText("audio") }
+            https.enqueue(MockResponse().setBody("{\"files\":[{\"id\":\"folder\"}]}"))
+            https.enqueue(MockResponse().setBody("{\"ids\":[\"recording\"]}"))
+            https.enqueue(MockResponse().setHeader("Location", https.url("/session")))
+            https.enqueue(MockResponse().setBody(acknowledgement(file)))
+            assertFalse(DriveUploader(https.url("/").toString().removeSuffix("/")).uploadFile(file))
+            assertTrue(file.exists())
+            assertFalse("No upload receipt can be created through an untrusted connection", DriveUploader.receipt(file).baseFile.exists())
+        } finally {
+            https.shutdown()
+        }
     }
 
     @Test fun emptyFolderListCreatesFolderAndUploads() = runTest {
