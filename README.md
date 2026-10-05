@@ -1,83 +1,76 @@
-# ClawHark
+> Fork of [ivar2000/clawhark](https://github.com/ivar2000/clawhark). Original project copyright © 2026 Michael Ettlinger; see [LICENSE](LICENSE).
 
-ClawHark records audio on a Wear OS watch and uploads completed recordings directly to your Google Drive. It runs on the watch without a companion phone app.
+`ClawHark` records audio on a Wear OS watch and saves completed recordings to your Google Drive. This fork focuses on watch recording and Drive uploads, for people who want to capture audio without a companion phone app.
 
-## Recording and uploads
+# What It Does
 
-- Always-on microphone recording with a persistent notification and a partial wake lock; capture continues until you stop it, subject to microphone availability, permissions, and storage.
-- Amplitude-based silence filtering; loud background noise can also pass the filter.
-- Up to 15-minute AAC/M4A chunks at 16 kHz mono and 32 kbps.
-- Google Drive uploads to a `ClawHark` folder using the limited `drive.file` scope.
-- Uploads scheduled hourly on an unmetered connection, with a four-hour fallback on any connected network. WorkManager may defer execution.
-- Resumable uploads through Google's Drive client. Persistent file IDs prevent duplicate uploads after a lost acknowledgement.
-- Local recordings deleted only after Drive confirms the file's ID, name, size, and checksum.
-- Microphone recovery retries automatically. Storage pressure pauses capture and preserves pending audio.
-- After reboot, the app attempts to resume recording if you left it enabled. If Android rejects the background start or microphone access, a notification asks you to open the app.
+- **Always-on recording:** Keeps capturing until you stop it, subject to microphone availability, permissions, storage, and Android background restrictions.
+- **Silence filtering:** Saves audio above an amplitude threshold, including loud background noise.
+- **Portable recordings:** Creates mono AAC/M4A files in chunks of up to 15 minutes.
+- **Google Drive uploads:** Sends completed files to a `ClawHark` folder in the account you link.
+- **Queue preservation:** Retains pending audio through upload failures and pauses capture when storage is full.
+- **Watch controls:** Start with one tap, confirm stopping with a second tap, and long-press to sign out.
 
-The project contains the watch app and Google Drive upload functionality. There is no desktop sync, transcription, AI pipeline, or HTTP recording server.
+# How It Works
 
-## Build
+1. Install a configured APK on your watch and grant microphone permission.
+2. Tap **LINK** and enter the displayed code at Google's device authorization page.
+3. Keep the watch charged while it records and filters silence. Linking starts recording when the app is visible.
+4. Give the watch a network connection. Completed recordings appear in your `ClawHark` folder in Google Drive, where you can play or download them.
 
-Requirements: JDK 17, an Android SDK with platform 34, and a Wear OS watch running Android API 30 or newer.
+# How it Really Works
 
-Enable the Google Drive API in your [Google Cloud project](https://console.cloud.google.com/apis/library/drive.googleapis.com). Create an OAuth client with type **TVs and Limited Input devices** in [Google Cloud Console](https://console.cloud.google.com/apis/credentials), and configure the OAuth consent screen for the `https://www.googleapis.com/auth/drive.file` scope.
+1. **Audio stays local until upload.** The watch stores recordings in private app storage at 16 kHz mono and 32 kbps. Silence filtering uses sound amplitude; it does not identify speakers or distinguish speech from other noise.
+2. **Uploads follow network availability.** The app schedules uploads hourly on an unmetered connection, with a four-hour fallback on any connected network. Android can defer those jobs. Stopping recording also schedules an upload of the final completed chunk.
+3. **Upload confirmation controls deletion.** Interrupted transfers are retried. A persistent file ID prevents duplicate uploads after a lost acknowledgement. The local file is deleted only after Drive confirms the matching ID, name, size, and checksum.
+4. **Storage pressure pauses recording.** At a 500 MiB local queue or below 50 MiB of free space, capture pauses while preserving pending audio. Uploads can free space and allow recording to resume; microphone failures are retried automatically.
+5. **Account changes preserve the local queue.** Signing out stops recording, clears local credentials, cancels uploads, and attempts to revoke Google's authorization. Linking another account sends the pending queue to that account. Uninstalling deletes local audio and credentials; files already in Drive remain there.
 
-Copy `app/src/main/assets/oauth_config.json.example` to `app/src/main/assets/oauth_config.json` and fill in your client ID and client secret. This local configuration is ignored by Git. OAuth client credentials bundled in an APK are extractable; account access and refresh tokens are kept in encrypted on-device preferences.
+# Prerequisites
 
-Set `JAVA_HOME` to your JDK 17 installation and `ANDROID_HOME` to your SDK installation, or configure `sdk.dir` in ignored `local.properties`.
+- A Wear OS watch running Android API 30 or newer, with a microphone.
+- A Google account with available Drive storage and a network connection for authorization and uploads.
+- An APK configured for Google's device authorization flow. Build and OAuth setup instructions are in [AGENTS.md](AGENTS.md).
+- [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools), with `adb` available on your computer, for watch installation.
 
-```bash
-./gradlew testDebugUnitTest lintDebug assembleDebug
-```
+# Installation
 
-The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. `./gradlew assembleRelease` builds a minimized unsigned APK when signing properties are absent. To produce an installable signed release, provide your own signing configuration using `keystore.properties.example` as a template.
+Enable wireless debugging on the watch, then pair and connect using [ADB's wireless debugging instructions](https://developer.android.com/tools/adb#wireless-android11-command-line).
 
-## Install and use
-
-Enable wireless debugging on the watch, pair and connect with [ADB](https://developer.android.com/tools/adb), then install:
-
-```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
-```
-
-Open ClawHark, grant microphone permission, tap **LINK**, and enter the displayed code at Google's device authorization page. Linking enables recording while the app is visible.
-
-- Tap **START** to record.
-- Tap **STOP**, then confirm within three seconds to stop. The final chunk is completed before the final upload is scheduled.
-- Long-press the recording button to sign out. This stops recording, disconnects locally, cancels queued uploads, and attempts to revoke Google's authorization.
-- If revocation cannot complete, revoke access through [Google Account permissions](https://myaccount.google.com/permissions).
-- Open your `ClawHark` folder in Google Drive to play or download recordings.
-
-Pending audio remains on the watch when you stop recording or sign out. Signing in again uploads the pending queue to the account you link. Uninstalling deletes local recordings and credentials.
-
-If Google authorization is revoked during recording, audio stays local and the recording controls remain available. Stop recording and link Drive again to resume uploads.
-
-Notification permission is needed for resume reminders, but microphone permission alone is sufficient to record. If automatic restart fails and notifications are disabled, open ClawHark manually after restarting the watch.
-
-On first launch, the app opens Android's battery optimization settings. Allow ClawHark there if you need recording to continue while the watch is stationary with its screen off. Doze can otherwise suspend CPU work and defer uploads.
-
-## Reliability and limitations
-
-The UI distinguishes recording, microphone recovery, and storage pauses. Pending audio is preserved at the 500 MB local queue limit or when available space falls below 50 MB. Uploads can free space and allow recording to resume.
-
-Automatic recording after reboot still needs testing on the Pixel Watch 3 running Wear OS 7. Android documents [restrictions and exceptions for microphone foreground services](https://developer.android.com/develop/background-work/services/fgs/service-types#microphone); a successful service-start request alone does not prove microphone capture resumed.
-
-Incomplete files left by a crash are kept locally. Only temporary files that contain a readable audio track are published for upload. An abrupt process termination can leave the current MP4 chunk unplayable; this cannot be repaired by renaming it.
-
-Continuous microphone capture and its wake lock consume battery even during silence. Battery life and real microphone/codec behavior must be checked on the intended watch.
-
-## Debugging
-
-Debug builds support:
+For the debug APK produced by the build instructions in [AGENTS.md](AGENTS.md):
 
 ```bash
-adb logcat -s WR.Service WR.Drive WR.Auth WR.Upload
-adb shell "run-as ai.etti.clawhark cat files/logs/clawhark.log"
-adb shell "run-as ai.etti.clawhark ls -la files/recordings"
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Regression tests exercise service lifecycle, permission gates, upload ownership, and HTTP failures with Robolectric and MockWebServer. These checks supplement testing on a physical watch.
+A release APK must be signed before installation. Its signing setup is documented in [AGENTS.md](AGENTS.md).
 
-## Privacy and license
+# Quick Start
 
-See [PRIVACY.md](PRIVACY.md) for storage, transfer, and account controls. MIT licensed; see [LICENSE](LICENSE).
+1. Open `ClawHark`, grant microphone permission, tap **LINK**, and authorize the displayed code with Google.
+2. Tap **START** when stopped. To stop, tap **STOP**, then tap again within three seconds to confirm.
+3. Open the `ClawHark` folder in Google Drive to check a recent recording containing speech.
+4. To disconnect, long-press the recording button. If Google's revocation cannot complete, remove access through [Google Account permissions](https://myaccount.google.com/permissions).
+
+# Configuration
+
+| Control | Where to change it | Effect |
+| :--- | :--- | :--- |
+| Microphone permission | Watch Settings → Apps → `ClawHark` | Required for recording. Restore it here if permission is denied permanently. |
+| Notifications | Watch Settings → Apps → `ClawHark` | Enables recording notifications and resume reminders. Denying it does not prevent recording. |
+| Battery optimization | Android battery optimization settings | Allow `ClawHark` to reduce interruptions while the watch is stationary with its screen off. The app offers these settings on first launch if it is not already exempt. |
+| Google account | Long-press to sign out, then tap **LINK** | Changes where pending and future recordings are uploaded. |
+
+# Reliability and Privacy
+
+After reboot, the app attempts to resume recording if you left it enabled. If Android rejects the background start or microphone access, it shows a resume notification when notification permission is available. Otherwise, open the app manually. Automatic capture after reboot still needs testing on the Pixel Watch 3 running Wear OS 7; Android documents [restrictions and exceptions for microphone foreground services](https://developer.android.com/develop/background-work/services/fgs/service-types#microphone).
+
+If Google authorization is revoked during recording, audio stays local and the stop control remains available. Stop recording and link Drive again to resume uploads.
+
+An abrupt process termination can leave the current MP4 chunk unplayable. Incomplete files are preserved locally; only temporary files with a readable audio track are published for upload. Continuous microphone capture consumes battery even during silence. Battery life, codec behavior, and reboot capture need verification on the intended watch.
+
+The app requests the limited `drive.file` scope and uploads audio directly to Google. Access and refresh tokens are kept in encrypted on-device preferences. It has no developer-operated server or telemetry collection. See [PRIVACY.md](PRIVACY.md) for storage, transfer, and account controls.
+
+# License
+
+[MIT](LICENSE), with the original copyright notice preserved.
